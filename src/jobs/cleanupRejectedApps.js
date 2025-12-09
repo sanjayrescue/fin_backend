@@ -1,8 +1,8 @@
 import mongoose from "mongoose";
 import fs from "fs";
 import path from "path";
-import Application from "../models/Application.js";
-import User from "../models/User.js";
+import {Application} from "../models/Application.js";
+import {User} from "../models/User.js";
 
 export const cleanupRejectedApps = async () => {
   try {
