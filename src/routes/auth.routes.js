@@ -59,56 +59,70 @@ router.post("/create-admin", async (req, res) => {
  * LOGIN  (Admin, ASM, RM, Partner)
  */
 router.post("/login", async (req, res) => {
-  const { email, password } = req.body || {};
-  if (!email || !password)
-    return res.status(400).json({ message: "email and password required" });
+  try {
+    const { email, password } = req.body || {};
+    if (!email || !password) {
+      return res.status(400).json({ message: "email and password required" });
+    }
 
-  // find user regardless of status
-  const user = await User.findOne({ email: email.toLowerCase() });
-  if (!user) return res.status(401).json({ message: "Invalid credentials" });
+    // Always fetch by email; passwordHash is the stored argon2 hash
+    const user = await User.findOne({ email: email.toLowerCase() });
+    if (!user) {
+      return res.status(401).json({ message: "Invalid credentials" });
+    }
 
-  // explicitly block suspended users
-  if (user.status === "SUSPENDED") {
-    return res
-      .status(403)
-      .json({ message: "Your account has been suspended. Contact admin." });
-  }
+    // explicitly block suspended users
+    if (user.status === "SUSPENDED") {
+      return res
+        .status(403)
+        .json({ message: "Your account has been suspended. Contact admin." });
+    }
 
-  // only ACTIVE users can proceed
-  if (user.status !== "ACTIVE") {
-    return res
-      .status(403)
-      .json({ message: `Account is not active (status: ${user.status}).` });
-  }
+    // only ACTIVE users can proceed
+    if (user.status !== "ACTIVE") {
+      return res
+        .status(403)
+        .json({ message: `Account is not active (status: ${user.status}).` });
+    }
 
-  // check password
-  const ok = await argon2.verify(user.passwordHash, password);
-  if (!ok) return res.status(401).json({ message: "Invalid credentials" });
+    if (!user.passwordHash) {
+      return res
+        .status(500)
+        .json({ message: "Password not set for this account" });
+    }
 
-  // issue token
-  const token = signAccessToken({
-    sub: String(user._id),
-    role: user.role,
-    rmId: user.rmId ? String(user.rmId) : undefined,
-    asmId: user.asmId ? String(user.asmId) : undefined,
-  });
+    // verify the argon2 hash with the plain password received
+    const ok = await argon2.verify(user.passwordHash, password);
+    if (!ok) return res.status(401).json({ message: "Invalid credentials" });
 
-  return res.json({
-    token,
-    user: {
-      id: user._id,
-      firstName: user.firstName,
-      lastName: user.lastName,
-      email: user.email,
+    // issue token
+    const token = signAccessToken({
+      sub: String(user._id),
       role: user.role,
-      asmCode: user.asmCode,
-      status: user.status,
-      rmCode: user.rmCode,
-      asmId: user.asmId,
-      partnerCode: user.partnerCode,
-      employeeId: user.employeeId,
-    },
-  });
+      rmId: user.rmId ? String(user.rmId) : undefined,
+      asmId: user.asmId ? String(user.asmId) : undefined,
+    });
+
+    return res.json({
+      token,
+      user: {
+        id: user._id,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        email: user.email,
+        role: user.role,
+        asmCode: user.asmCode,
+        status: user.status,
+        rmCode: user.rmCode,
+        asmId: user.asmId,
+        partnerCode: user.partnerCode,
+        employeeId: user.employeeId,
+      },
+    });
+  } catch (err) {
+    console.error("Login error:", err);
+    return res.status(500).json({ message: "Internal server error" });
+  }
 });
 
 // POST /admin/login-as/:userId

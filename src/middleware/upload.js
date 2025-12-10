@@ -11,9 +11,9 @@ const allowedMimeTypes = [
 
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
-    const userId = req.user?.sub;
-    if (!userId) return cb(new Error("Missing user context for upload"));
-    const uploadPath = path.join("uploads", userId.toString());
+    // Allow uploads for both authenticated and public flows
+    const ownerId = req.user?.sub || req.headers["x-upload-user"] || "public";
+    const uploadPath = path.join("uploads", ownerId.toString());
     fs.mkdirSync(uploadPath, { recursive: true });
     cb(null, uploadPath);
   },
@@ -33,5 +33,5 @@ const fileFilter = (req, file, cb) => {
 export const upload = multer({
   storage,
   fileFilter,
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
+  limits: { fileSize: 20 * 1024 * 1024 }, // 20MB
 });

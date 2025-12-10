@@ -58,8 +58,19 @@ app.use(hpp());
 app.use(express.json({ limit: "1mb" }));
 app.use(morgan("tiny"));
 
-const limiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 300 });
-app.use(limiter);
+// === RATE LIMITER FOR SENSITIVE ENDPOINTS ONLY ===
+const authLimiter = rateLimit({
+  windowMs: 5 * 60 * 1000, // 5 minutes
+  max: 20,
+  message: "Too many attempts, try again later",
+});
+
+// Apply limiter ONLY on these sensitive routes
+app.use("/api/auth/login", authLimiter);
+app.use("/api/auth/create-admin", authLimiter);
+app.use("/api/auth/reset-password/request", authLimiter);
+app.use("/api/auth/reset-password/confirm", authLimiter);
+app.use("/api/partner/signup-partner", authLimiter);
 
 app.use(
   cors({

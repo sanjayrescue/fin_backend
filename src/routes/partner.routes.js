@@ -17,6 +17,71 @@ import { Target } from "../models/Target.js";
 import fs from "fs";
 import path from "path";
 
+const validateApplicationPayload = ({
+  customer = {},
+  product = {},
+  loanType,
+  references = [],
+  coApplicant,
+}) => {
+  const errors = [];
+
+  if (!customer.firstName) errors.push("Customer first name is required");
+  if (!customer.email) errors.push("Customer email is required");
+  if (customer.email && !/^\S+@\S+\.\S+$/.test(customer.email)) {
+    errors.push("Customer email format is invalid");
+  }
+  if (!customer.phone) {
+    errors.push("Customer phone is required");
+  } else if (!/^\d{10}$/.test(String(customer.phone))) {
+    errors.push("Customer phone must be 10 digits");
+  }
+
+  if (
+    !loanType ||
+    !Application.schema.path("loanType").enumValues.includes(loanType)
+  ) {
+    errors.push("A valid loanType is required");
+  }
+
+  if (["PERSONAL", "HOME_LOAN_SALARIED"].includes(loanType || "")) {
+    if (!product.companyName) errors.push("Company name is required");
+    if (!product.designation) errors.push("Designation is required");
+    if (!product.monthlySalary) errors.push("Monthly salary is required");
+  }
+
+  if (["BUSINESS", "HOME_LOAN_SELF_EMPLOYED"].includes(loanType || "")) {
+    if (!product.businessName) errors.push("Business name is required");
+    if (!product.businessAddress) errors.push("Business address is required");
+    if (!product.businessVintage) errors.push("Business vintage is required");
+  }
+
+  const refs = Array.isArray(references)
+    ? references
+    : references
+    ? [references]
+    : [];
+
+  if (refs.length < 2) {
+    errors.push("At least two references are required");
+  }
+
+  refs.forEach((ref, index) => {
+    if (!ref?.name) errors.push(`Reference ${index + 1} name is required`);
+    if (!ref?.phone) {
+      errors.push(`Reference ${index + 1} phone is required`);
+    } else if (!/^\d{10}$/.test(String(ref.phone))) {
+      errors.push(`Reference ${index + 1} phone must be 10 digits`);
+    }
+  });
+
+  if (customer.gender === "Female" && !coApplicant?.phone) {
+    errors.push("Co-applicant phone is required for female applicants");
+  }
+
+  return errors;
+};
+
 const router = Router();
 
 router.post(
@@ -237,23 +302,18 @@ router.post(
         partnerReferralCode,
       } = JSON.parse(req.body.data || "{}");
 
-      if (!customer?.firstName || !customer?.email || !customer?.phone) {
+      const validationErrors = validateApplicationPayload({
+        customer,
+        product,
+        loanType,
+        references,
+        coApplicant,
+      });
+
+      if (validationErrors.length > 0) {
         return res
           .status(400)
-          .json({ message: "customer.firstName, email, phone required" });
-      }
-
-      if (
-        !loanType ||
-        !Application.schema.path("loanType").enumValues.includes(loanType)
-      ) {
-        return res.status(400).json({ message: "Valid loanType is required" });
-      }
-
-      if (customer.gender === "Female" && !coApplicant?.phone) {
-        return res.status(400).json({
-          message: "Co-applicant phone is required for female applicants",
-        });
+          .json({ message: "Validation failed", errors: validationErrors });
       }
 
       // Resolve referral partner mapping
@@ -543,23 +603,18 @@ router.post(
         partnerReferralCode,
       } = JSON.parse(req.body.data || "{}");
 
-      if (!customer?.firstName || !customer?.email || !customer?.phone) {
+      const validationErrors = validateApplicationPayload({
+        customer,
+        product,
+        loanType,
+        references,
+        coApplicant,
+      });
+
+      if (validationErrors.length > 0) {
         return res
           .status(400)
-          .json({ message: "customer.firstName, email, phone required" });
-      }
-
-      if (
-        !loanType ||
-        !Application.schema.path("loanType").enumValues.includes(loanType)
-      ) {
-        return res.status(400).json({ message: "Valid loanType is required" });
-      }
-
-      if (customer.gender === "Female" && !coApplicant?.phone) {
-        return res.status(400).json({
-          message: "Co-applicant phone is required for female applicants",
-        });
+          .json({ message: "Validation failed", errors: validationErrors });
       }
 
       // Resolve partner mapping when customer applies directly via referral code

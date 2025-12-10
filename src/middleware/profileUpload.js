@@ -33,6 +33,6 @@ const fileFilter = (req, file, cb) => {
 export const partnerUpload = multer({
   storage,
   fileFilter,
-  limits: { fileSize: 10 * 1024 * 1024 },
+  limits: { fileSize: 20 * 1024 * 1024 },
 });
 
