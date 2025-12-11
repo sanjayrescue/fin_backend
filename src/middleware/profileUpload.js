@@ -1,6 +1,7 @@
 import multer from "multer";
+import multerS3 from "multer-s3";
 import path from "path";
-import fs from "fs";
+import { s3, BUCKET_NAME } from "../config/s3.js";
 
 const allowedMimeTypes = [
   "image/jpeg",
@@ -9,17 +10,19 @@ const allowedMimeTypes = [
   "application/pdf",
 ];
 
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
+const storage = multerS3({
+  s3,
+  bucket: BUCKET_NAME,
+  contentType: multerS3.AUTO_CONTENT_TYPE,
+  key: (req, file, cb) => {
     const partnerId = req.partnerId || "temp";
-    const uploadPath = path.join("uploads", "profileDocs", partnerId.toString());
-    fs.mkdirSync(uploadPath, { recursive: true });
-    cb(null, uploadPath);
-  },
-  filename: (req, file, cb) => {
     const uploaderId = req.user ? req.user.sub : "self";
     const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
-    cb(null, `${file.fieldname}-${uploaderId}-${uniqueSuffix}${path.extname(file.originalname)}`);
+    const ext = path.extname(file.originalname) || "";
+    cb(
+      null,
+      `profileDocs/${partnerId}/${file.fieldname}-${uploaderId}-${uniqueSuffix}${ext}`
+    );
   },
 });
 

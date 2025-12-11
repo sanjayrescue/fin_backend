@@ -79,9 +79,12 @@ router.post(
       let docs = [];
       if (req.files) {
         req.files.forEach((file) => {
+          if (!file.location) {
+            throw new Error("S3 upload failed: missing file location");
+          }
           docs.push({
             docType: file.fieldname.toUpperCase(),
-            url: file.path,
+            url: file.location,
             uploadedBy: req.user.sub,
             status: "PENDING",
           });

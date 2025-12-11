@@ -14,8 +14,6 @@ import mongoose from "mongoose";
 import { makePartnerCode } from "../utils/codes.js";
 import { sendMail } from "../utils/sendMail.js";
 import { Target } from "../models/Target.js";
-import fs from "fs";
-import path from "path";
 
 const validateApplicationPayload = ({
   customer = {},
@@ -84,8 +82,15 @@ const validateApplicationPayload = ({
 
 const router = Router();
 
+// Pre-generate partnerId so the upload middleware can place files under a stable key
+const assignPartnerId = (req, _res, next) => {
+  req.partnerId = new mongoose.Types.ObjectId();
+  next();
+};
+
 router.post(
   "/signup-partner",
+  assignPartnerId,
   partnerUpload.any(), // Accept any file field
   async (req, res) => {
     try {
@@ -149,23 +154,15 @@ router.post(
         if (superAdmin) assignedRmId = superAdmin._id;
       }
 
-      // Pre-generate partnerId so we can create folder
-      const partnerId = new mongoose.Types.ObjectId();
+      const partnerId = req.partnerId || new mongoose.Types.ObjectId();
 
-      // Ensure folder exists
-      const partnerDir = path.join("uploads/profileDocs", String(partnerId));
-      if (!fs.existsSync(partnerDir)) {
-        fs.mkdirSync(partnerDir, { recursive: true });
-      }
-
-      // Move uploaded files into partner folder
       const docs = (req.files || []).map((file) => {
-        const fileName = `${file.fieldname}-${Date.now()}-${file.originalname}`;
-        const permanentPath = path.join(partnerDir, fileName);
-        fs.renameSync(file.path, permanentPath);
+        if (!file.location) {
+          throw new Error("S3 upload failed: missing file location");
+        }
         return {
           docType: file.fieldname.toUpperCase(),
-          url: `/uploads/profileDocs/${partnerId}/${fileName}`,
+          url: file.location,
           uploadedBy: null,
           status: "PENDING",
         };
@@ -376,12 +373,17 @@ router.post(
         ? [req.body.docTypes]
         : [];
 
-      const newDocs = req.files.map((file, index) => ({
-        docType: docTypes[index] || "UNKNOWN",
-        url: file.path,
-        uploadedBy: null,
-        status: "PENDING",
-      }));
+      const newDocs = req.files.map((file, index) => {
+        if (!file.location) {
+          throw new Error("S3 upload failed: missing file location");
+        }
+        return {
+          docType: docTypes[index] || "UNKNOWN",
+          url: file.location,
+          uploadedBy: null,
+          status: "PENDING",
+        };
+      });
 
       // Prepare conditional sections
       let employmentInfo = null;
@@ -683,12 +685,17 @@ router.post(
         ? [req.body.docTypes]
         : [];
 
-      const newDocs = req.files.map((file, index) => ({
-        docType: docTypes[index] || "UNKNOWN",
-        url: file.path,
-        uploadedBy: userId,
-        status: "PENDING",
-      }));
+      const newDocs = req.files.map((file, index) => {
+        if (!file.location) {
+          throw new Error("S3 upload failed: missing file location");
+        }
+        return {
+          docType: docTypes[index] || "UNKNOWN",
+          url: file.location,
+          uploadedBy: userId,
+          status: "PENDING",
+        };
+      });
 
       // Prepare conditional sections
       let employmentInfo = null;

@@ -112,7 +112,12 @@ router.post(
 
       const docs = req.files.map((file, index) => ({
         docType: docTypes[index] || "UNKNOWN",
-        url: file.path,
+        url: (() => {
+          if (!file.location) {
+            throw new Error("S3 upload failed: missing file location");
+          }
+          return file.location;
+        })(),
         uploadedBy: userId,
         status: "PENDING",
       }));

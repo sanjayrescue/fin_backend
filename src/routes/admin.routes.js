@@ -550,21 +550,14 @@ router.get(
         .select("-passwordHash -__v")
         .lean();
 
-      const BASE_URL = process.env.BACKEND_URL || "http://localhost:5000";
-
-      // Map partners and rebuild docs for each partner
+      // Map partners and keep stored doc URLs (S3 URLs already absolute)
       const formatted = partners.map((p) => {
-        const docs = (p.docs || []).map((doc) => ({
-          ...doc,
-          url: `${BASE_URL.replace(/\/$/, "")}/${doc.url.replace(/^\/+/, "")}`,
-        }));
-
         return {
           ...p,
           rmId: admin._id,
           rmName: `${admin.firstName} ${admin.lastName}`,
           rmEmployeeId: admin.employeeId,
-          docs,
+          docs: p.docs || [],
         };
       });
 
@@ -2479,14 +2472,17 @@ router.post(
         return res.status(400).json({ message: "No files uploaded" });
 
       const banners = await Promise.all(
-        req.files.map((file) =>
-          Banner.create({
-            imageUrl: file.path,
+        req.files.map((file) => {
+          if (!file.location) {
+            throw new Error("S3 upload failed: missing file location");
+          }
+          return Banner.create({
+            imageUrl: file.location,
             title: req.body.title,
             description: req.body.description,
             uploadedBy: req.user.sub,
-          })
-        )
+          });
+        })
       );
 
       res
