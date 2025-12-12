@@ -1617,49 +1617,67 @@ router.patch(
   }
 );
 
-// GET all banners
+
 
 // router.get("/banners", auth, async (req, res) => {
 //   try {
 //     const banners = await Banner.find().sort({ createdAt: -1 });
 
-//     const host = req.protocol + "://" + req.get("host"); // e.g.,
-
 //     const bannersWithUrl = banners.map((b) => ({
 //       _id: b._id,
 //       title: b.title,
 //       description: b.description,
-//       // fix backslashes and prepend host
-//       imageUrl: host + "/" + b.imageUrl.replace(/\\/g, "/"),
+//       imageUrl: b.imageUrl,  // always S3 URL from MongoDB
 //     }));
 
 //     res.json({ banners: bannersWithUrl });
 //   } catch (err) {
+//     console.error("Error fetching banners:", err);
 //     res.status(500).json({ message: err.message });
 //   }
 // });
+
 
 router.get("/banners", auth, async (req, res) => {
   try {
     const banners = await Banner.find().sort({ createdAt: -1 });
 
-    // ✅ Prefer env var, fallback to request host
-    const backendUrl = process.env.BACKEND_URL || req.protocol + "://" + req.get("host");
+    // Build base host (http://localhost:5000 or https://yourdomain.com)
+    const host = `${req.protocol}://${req.get("host")}`;
 
-    const bannersWithUrl = banners.map((b) => ({
-      _id: b._id,
-      title: b.title,
-      description: b.description,
-      // ✅ Always prepend backend URL, fix backslashes
-      imageUrl: backendUrl + "/" + b.imageUrl.replace(/\\/g, "/"),
-    }));
+    const bannersWithUrl = banners.map((b) => {
+      let imgUrl = b.imageUrl.replace(/\\/g, "/");
+
+      // ✅ If it's already a full URL, keep it
+      if (/^https?:\/\//i.test(imgUrl)) {
+        return {
+          _id: b._id,
+          title: b.title,
+          description: b.description,
+          imageUrl: imgUrl,
+        };
+      }
+
+      // ✅ Otherwise prepend backend host
+      if (!imgUrl.startsWith("/uploads")) {
+        imgUrl = "/" + imgUrl;
+      }
+
+      return {
+        _id: b._id,
+        title: b.title,
+        description: b.description,
+        imageUrl: `${host}${imgUrl}`,
+      };
+    });
 
     res.json({ banners: bannersWithUrl });
   } catch (err) {
-    console.error("Error fetching banners:", err);
-    res.status(500).json({ message: err.message });
+    console.error("Banner fetch error:", err);
+    res.status(500).json({ message: "Internal server error" });
   }
 });
+
 
 
 // Universal analytics/dashboard API with user profile

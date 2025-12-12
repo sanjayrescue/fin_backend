@@ -234,17 +234,36 @@ router.post("/reset-password/request", async (req, res) => {
     // Reset link only needs token + email
     const resetLink = `http://localhost:5173/reset-password/confirm?token=${resetToken}&email=${user.email}`;
 
-    await sendMail({
-      to: user.email,
-      subject: "Password Reset Request",
-      html: `
-        <h2>Password Reset</h2>
-        <p>Hello ${user.name || "User"},</p>
-        <p>Click below to reset your password:</p>
-        <a href="${resetLink}">Reset Password</a>
-        <p>If you didn’t request this, ignore this email.</p>
-      `,
-    });
+    // Ensure mailer is configured to prevent 500s on missing env
+    if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
+      console.error(
+        "Reset request: email credentials are missing. Skipping email send."
+      );
+      return res.status(500).json({
+        message:
+          "Email service not configured. Contact support to complete password reset.",
+      });
+    }
+
+    try {
+      await sendMail({
+        to: user.email,
+        subject: "Password Reset Request",
+        html: `
+          <h2>Password Reset</h2>
+          <p>Hello ${user.name || "User"},</p>
+          <p>Click below to reset your password:</p>
+          <a href="${resetLink}">Reset Password</a>
+          <p>If you didn’t request this, ignore this email.</p>
+        `,
+      });
+    } catch (mailErr) {
+      console.error("Reset request: failed to send email", mailErr);
+      return res.status(500).json({
+        message:
+          "Unable to send reset email right now. Please try again or contact support.",
+      });
+    }
 
     return res.json({ message: "If an account exists, reset link sent" });
   } catch (err) {

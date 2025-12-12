@@ -19,6 +19,7 @@ import { upload } from "../middleware/upload.js";
 import { FollowUp } from "../models/followUp.js";
 import dayjs from "dayjs";
 import { sendMail } from "../utils/sendMail.js";
+import axios from "axios";
 
 const router = Router();
 
@@ -1480,32 +1481,126 @@ router.get(
         (d) => d.docType.toUpperCase() === docType.toUpperCase()
       );
       if (!doc) {
-        return res.status(404).json({ message: "Document not found" });
+        console.error(`Document not found: docType=${docType}, available docs:`, app.docs.map(d => d.docType));
+        return res.status(404).json({ 
+          message: "Document not found",
+          docType: docType,
+          availableDocTypes: app.docs.map(d => d.docType)
+        });
       }
 
-      let fileStream;
+      if (!doc.url || doc.url.trim() === "") {
+        console.error(`Document URL is empty: docType=${docType}, docId=${doc._id}`);
+        return res.status(400).json({ 
+          message: "Document URL is empty or invalid",
+          docType: docType
+        });
+      }
+
       let filename;
       let contentType;
+      const backendUrl = process.env.BACKEND_URL || "http://localhost:5000";
+      
+      // Get the actual file URL (remove backend URL prefix if present)
+      let actualUrl = doc.url.trim();
+      if (actualUrl.startsWith(backendUrl)) {
+        // Strip backend URL prefix to get the actual path
+        actualUrl = actualUrl.replace(backendUrl, "").replace(/^\/+/, "");
+      }
+      
+      console.log(`Downloading document: docType=${docType}, actualUrl=${actualUrl.substring(0, 100)}...`);
 
-      if (doc.url.startsWith("http")) {
-        // 🔹 Remote URL (Render/S3 etc.)
-        const response = await axios.get(doc.url, { responseType: "stream" });
-        contentType =
-          response.headers["content-type"] || "application/octet-stream";
-        const ext = path.extname(new URL(doc.url).pathname);
-        filename = `${docType}${ext}`;
-        res.setHeader(
-          "Content-Disposition",
-          `attachment; filename="${filename}"`
-        );
-        res.setHeader("Content-Type", contentType);
-        response.data.pipe(res);
+      // Check if it's a remote URL (S3, external CDN, etc.)
+      if (actualUrl.startsWith("http://") || actualUrl.startsWith("https://")) {
+        // 🔹 Remote URL (S3, CDN, etc.)
+        try {
+          const response = await axios.get(actualUrl, { 
+            responseType: "stream",
+            timeout: 30000, // 30 second timeout
+            maxRedirects: 5
+          });
+          
+          contentType =
+            response.headers["content-type"] || "application/octet-stream";
+          
+          // Try to get extension from URL or Content-Type
+          let ext = "";
+          try {
+            const urlPath = new URL(actualUrl).pathname;
+            ext = path.extname(urlPath) || "";
+          } catch (e) {
+            // If URL parsing fails, try to infer from content-type
+            if (contentType.includes("image/jpeg") || contentType.includes("image/jpg")) {
+              ext = ".jpg";
+            } else if (contentType.includes("image/png")) {
+              ext = ".png";
+            } else if (contentType.includes("application/pdf")) {
+              ext = ".pdf";
+            } else {
+              ext = "";
+            }
+          }
+          
+          filename = `${docType}${ext}`;
+          
+          res.setHeader(
+            "Content-Disposition",
+            `attachment; filename="${filename}"`
+          );
+          res.setHeader("Content-Type", contentType);
+          res.setHeader("Access-Control-Expose-Headers", "Content-Disposition");
+          
+          response.data.pipe(res);
+          
+          response.data.on("error", (err) => {
+            console.error("Stream error:", err);
+            if (!res.headersSent) {
+              res.status(500).json({ message: "Error streaming document" });
+            }
+          });
+        } catch (axiosErr) {
+          console.error("Error fetching remote document:", {
+            url: actualUrl.substring(0, 100),
+            message: axiosErr.message,
+            code: axiosErr.code,
+            status: axiosErr.response?.status,
+            statusText: axiosErr.response?.statusText,
+          });
+          if (!res.headersSent) {
+            const errorMsg = axiosErr.response?.status 
+              ? `Remote server returned ${axiosErr.response.status}: ${axiosErr.response.statusText || axiosErr.message}`
+              : `Error downloading document from remote server: ${axiosErr.message}`;
+            return res.status(500).json({ 
+              message: errorMsg,
+              error: axiosErr.message,
+              code: axiosErr.code
+            });
+          }
+        }
       } else {
         // 🔹 Local file
-        const filePath = path.resolve(process.cwd(), doc.url);
+        const filePath = path.resolve(process.cwd(), actualUrl);
+        
+        console.log(`Checking local file: ${filePath}`);
+        
         if (!fs.existsSync(filePath)) {
-          return res.status(404).json({ message: "File not found" });
+          console.error(`Local file not found: ${filePath}`);
+          return res.status(404).json({ 
+            message: "File not found on server",
+            path: actualUrl,
+            resolvedPath: filePath
+          });
         }
+        
+        const stats = fs.statSync(filePath);
+        if (!stats.isFile()) {
+          console.error(`Path is not a file: ${filePath}`);
+          return res.status(404).json({ 
+            message: "Path is not a file",
+            path: actualUrl
+          });
+        }
+        
         const ext = path.extname(filePath);
         filename = `${docType}${ext}`;
         contentType = mime.lookup(ext) || "application/octet-stream";
@@ -1515,12 +1610,26 @@ router.get(
           `attachment; filename="${filename}"`
         );
         res.setHeader("Content-Type", contentType);
-        fs.createReadStream(filePath).pipe(res);
+        res.setHeader("Content-Length", stats.size);
+        res.setHeader("Access-Control-Expose-Headers", "Content-Disposition");
+        
+        const fileStream = fs.createReadStream(filePath);
+        fileStream.pipe(res);
+        
+        fileStream.on("error", (err) => {
+          console.error("File stream error:", err);
+          if (!res.headersSent) {
+            res.status(500).json({ message: "Error reading file" });
+          }
+        });
       }
     } catch (err) {
       console.error("Download error:", err);
       if (!res.headersSent) {
-        res.status(500).json({ message: "Error downloading document" });
+        res.status(500).json({ 
+          message: "Error downloading document",
+          error: err.message 
+        });
       }
     }
   }
@@ -1705,24 +1814,55 @@ router.get(
       const archive = archiver("zip", { zlib: { level: 9 } });
       archive.pipe(res);
 
+      const backendUrl = process.env.BACKEND_URL || "http://localhost:5000";
+      let filesAdded = 0;
+
       for (const doc of app.docs) {
         try {
           let ext;
           let cleanFilename;
+          
+          // Get the actual file URL (remove backend URL prefix if present)
+          let actualUrl = doc.url;
+          if (actualUrl.startsWith(backendUrl)) {
+            actualUrl = actualUrl.replace(backendUrl, "").replace(/^\/+/, "");
+          }
 
-          if (doc.url.startsWith("http")) {
-            // 🔹 Remote fetch
-            const response = await axios.get(doc.url, { responseType: "stream" });
-            ext = path.extname(new URL(doc.url).pathname) || "";
-            cleanFilename = `${doc.docType}${ext}`;
-            archive.append(response.data, { name: cleanFilename });
+          if (actualUrl.startsWith("http://") || actualUrl.startsWith("https://")) {
+            // 🔹 Remote fetch (S3, CDN, etc.)
+            try {
+              const response = await axios.get(actualUrl, { 
+                responseType: "stream",
+                timeout: 30000,
+                maxRedirects: 5
+              });
+              
+              try {
+                const urlPath = new URL(actualUrl).pathname;
+                ext = path.extname(urlPath) || "";
+              } catch (e) {
+                ext = "";
+              }
+              
+              cleanFilename = `${doc.docType}${ext}`;
+              archive.append(response.data, { name: cleanFilename });
+              filesAdded++;
+            } catch (axiosErr) {
+              console.error(`Error fetching remote document ${doc.docType}:`, axiosErr.message);
+            }
           } else {
             // 🔹 Local file
-            const filePath = path.resolve(process.cwd(), doc.url);
+            const filePath = path.resolve(process.cwd(), actualUrl);
             if (fs.existsSync(filePath)) {
-              ext = path.extname(filePath);
-              cleanFilename = `${doc.docType}${ext}`;
-              archive.file(filePath, { name: cleanFilename });
+              const stats = fs.statSync(filePath);
+              if (stats.isFile()) {
+                ext = path.extname(filePath);
+                cleanFilename = `${doc.docType}${ext}`;
+                archive.file(filePath, { name: cleanFilename });
+                filesAdded++;
+              }
+            } else {
+              console.error(`File not found: ${actualUrl}`);
             }
           }
         } catch (error) {
@@ -1730,11 +1870,24 @@ router.get(
         }
       }
 
+      // If no files were added, return error
+      if (filesAdded === 0) {
+        archive.destroy();
+        if (!res.headersSent) {
+          return res.status(404).json({ 
+            message: "No valid documents found to download" 
+          });
+        }
+      }
+
       await archive.finalize();
     } catch (err) {
       console.error("Download all documents error:", err);
       if (!res.headersSent) {
-        res.status(500).json({ message: "Error creating document archive" });
+        res.status(500).json({ 
+          message: "Error creating document archive",
+          error: err.message 
+        });
       }
     }
   }
