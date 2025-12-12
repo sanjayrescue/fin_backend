@@ -1496,19 +1496,12 @@ router.get("/profile", auth, requireRole(ROLES.PARTNER), async (req, res) => {
       return res.status(404).json({ message: "Partner not found" });
     }
 
-    const BASE_URL = process.env.BACKEND_URL || "http://localhost:5000";
+    // Do NOT modify URLs — they are already full AWS S3 URLs
+    const docs = (partner.docs || []).map((doc) => ({
+      ...doc,
+      url: doc.url,
+    }));
 
-    // rebuild docs with proper absolute URL
-    const docs = (partner.docs || []).map((doc) => {
-      // replace backslashes with forward slashes
-      const cleanUrl = doc.url.replace(/\\/g, "/").replace(/^\/+/, "");
-      return {
-        ...doc,
-        url: `${BASE_URL.replace(/\/$/, "")}/${cleanUrl}`,
-      };
-    });
-
-    // extract selfie as profilePic
     const profilePic =
       docs.find((doc) => doc.docType === "SELFIE")?.url || null;
 
@@ -1524,17 +1517,16 @@ router.get("/profile", auth, requireRole(ROLES.PARTNER), async (req, res) => {
       dob: partner.dob,
       aadharNumber: partner.aadharNumber,
       panNumber: partner.panNumber,
-      address: partner.address, // fix: return proper address
+      address: partner.address,
       experience: partner.experience,
       region: partner.region,
       verification: partner.verification,
       referralCode: partner.referralCode,
       referralLink: `${
         process.env.CLIENT_URL || "https://trustlinefintech.com"
-      }/register?ref=${partner?.partnerCode}`,
+      }/LoginPage?ref=${partner?.partnerCode}`,
       status: partner.status,
 
-      // RM & ASM flattened
       rmId: partner.rmId?._id || null,
       rmName: partner.rmId
         ? `${partner.rmId.firstName} ${partner.rmId.lastName}`
@@ -1550,7 +1542,6 @@ router.get("/profile", auth, requireRole(ROLES.PARTNER), async (req, res) => {
       asmEmail: partner.rmId?.asmId?.email || null,
       asmPhone: partner.rmId?.asmId?.phone || null,
 
-      // return docs + selfie separately
       docs,
       profilePic,
     });

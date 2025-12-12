@@ -1162,6 +1162,46 @@ router.post(
   }
 );
 
+// Permanently delete an ASM (only after deactivation)
+router.delete(
+  "/asm/:asmId",
+  auth,
+  requireRole(ROLES.SUPER_ADMIN),
+  async (req, res) => {
+    try {
+      const { asmId } = req.params;
+
+      if (!mongoose.Types.ObjectId.isValid(asmId)) {
+        return res.status(400).json({ message: "Invalid ASM id" });
+      }
+
+      const asm = await User.findOne({ _id: asmId, role: ROLES.ASM });
+      if (!asm) {
+        return res.status(404).json({ message: "ASM not found" });
+      }
+
+      // Enforce safety: only allow delete once already deactivated
+      if (asm.status === "ACTIVE") {
+        return res
+          .status(400)
+          .json({ message: "Deactivate ASM before deleting the account" });
+      }
+
+      await Target.deleteMany({ assignedTo: asm._id });
+      await User.deleteOne({ _id: asm._id });
+
+      res.json({
+        message: "ASM account deleted permanently",
+        id: asm._id,
+        email: asm.email,
+      });
+    } catch (error) {
+      console.error("Error deleting ASM:", error);
+      res.status(500).json({ message: "Failed to delete ASM" });
+    }
+  }
+);
+
 router.post(
   "/assign-partners-rm",
   auth,
@@ -1314,6 +1354,45 @@ router.post(
     } catch (error) {
       console.error("Error in /rm/activate:", error);
       res.status(500).json({ message: error.message });
+    }
+  }
+);
+
+// Permanently delete an RM (only after deactivation)
+router.delete(
+  "/rm/:rmId",
+  auth,
+  requireRole(ROLES.SUPER_ADMIN),
+  async (req, res) => {
+    try {
+      const { rmId } = req.params;
+
+      if (!mongoose.Types.ObjectId.isValid(rmId)) {
+        return res.status(400).json({ message: "Invalid RM id" });
+      }
+
+      const rm = await User.findOne({ _id: rmId, role: ROLES.RM });
+      if (!rm) {
+        return res.status(404).json({ message: "RM not found" });
+      }
+
+      if (rm.status === "ACTIVE") {
+        return res
+          .status(400)
+          .json({ message: "Deactivate RM before deleting the account" });
+      }
+
+      await Target.deleteMany({ assignedTo: rm._id });
+      await User.deleteOne({ _id: rm._id });
+
+      res.json({
+        message: "RM account deleted permanently",
+        id: rm._id,
+        email: rm.email,
+      });
+    } catch (error) {
+      console.error("Error deleting RM:", error);
+      res.status(500).json({ message: "Failed to delete RM" });
     }
   }
 );

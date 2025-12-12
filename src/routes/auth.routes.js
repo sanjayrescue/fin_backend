@@ -232,7 +232,7 @@ router.post("/reset-password/request", async (req, res) => {
     await user.save();
 
     // Reset link only needs token + email
-    const resetLink = `http://localhost:5173/reset-password/confirm?token=${resetToken}&email=${user.email}`;
+    const resetLink = `https://trustlinefintech.com/reset-password/confirm?token=${resetToken}&email=${user.email}`;
 
     // Ensure mailer is configured to prevent 500s on missing env
     if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
