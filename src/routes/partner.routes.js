@@ -73,8 +73,13 @@ const validateApplicationPayload = ({
     }
   });
 
-  if (customer.gender === "Female" && !coApplicant?.phone) {
-    errors.push("Co-applicant phone is required for female applicants");
+  // Co-applicant is required for female applicants, but only for BUSINESS and HOME_LOAN_SELF_EMPLOYED loan types
+  if (
+    customer.gender === "Female" &&
+    ["BUSINESS", "HOME_LOAN_SELF_EMPLOYED"].includes(loanType || "") &&
+    !coApplicant?.phone
+  ) {
+    errors.push("Co-applicant phone is required for female applicants with business or home loan self-employed applications");
   }
 
   return errors;
