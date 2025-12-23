@@ -23,6 +23,12 @@ const storage = multerS3({
 });
 
 const fileFilter = (req, file, cb) => {
+  console.log('File filter check:', {
+    mimetype: file.mimetype,
+    originalname: file.originalname,
+    fieldname: file.fieldname,
+  });
+  
   if (allowedMimeTypes.includes(file.mimetype)) {
     return cb(null, true);
   }
@@ -32,5 +38,7 @@ const fileFilter = (req, file, cb) => {
 export const upload = multer({
   storage,
   fileFilter,
-  limits: { fileSize: 20 * 1024 * 1024 }, // 20MB
+  limits: { 
+    fileSize: 20 * 1024 * 1024, // 20MB
+  },
 });

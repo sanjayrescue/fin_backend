@@ -1512,6 +1512,74 @@ router.post(
   }
 );
 
+// Permanently delete/reject a partner request with all documents
+router.delete(
+  "/partner/:partnerId",
+  auth,
+  requireRole(ROLES.SUPER_ADMIN),
+  async (req, res) => {
+    try {
+      const { partnerId } = req.params;
+
+      if (!mongoose.Types.ObjectId.isValid(partnerId)) {
+        return res.status(400).json({ message: "Invalid Partner id" });
+      }
+
+      const partner = await User.findOne({ _id: partnerId, role: ROLES.PARTNER });
+      if (!partner) {
+        return res.status(404).json({ message: "Partner not found" });
+      }
+
+      // Delete all applications associated with this partner
+      await Application.deleteMany({ partnerId: partner._id });
+
+      // Delete all payouts associated with this partner
+      await Payout.deleteMany({ partnerId: partner._id });
+
+      // Delete all targets assigned to this partner
+      await Target.deleteMany({ assignedTo: partner._id });
+
+      // Reassign customers to null (or handle as needed)
+      await User.updateMany(
+        { partnerId: partner._id },
+        { $unset: { partnerId: "" } }
+      );
+
+      // Delete the partner user account (this will also remove their documents from S3 if configured)
+      await User.deleteOne({ _id: partner._id });
+
+      // 📧 Send rejection email
+      try {
+        await sendMail({
+          to: partner.email,
+          subject: "Partner Registration Request Rejected",
+          html: `
+            <p>Dear ${partner.firstName} ${partner.lastName},</p>
+            <p>We regret to inform you that your Partner registration request has been <b>rejected</b>.</p>
+            <p><b>Partner ID:</b> ${partner.partnerCode || partner.employeeId || "-"}</p>
+            <p>All associated documents and data have been removed from our system.</p>
+            <p>If you believe this action was incorrect, please contact support immediately.</p>
+            <br/>
+            <p>Regards,<br/>Trustline Fintech</p>
+          `,
+        });
+        console.log("📧 Rejection mail sent to:", partner.email);
+      } catch (mailErr) {
+        console.error("❌ Failed to send rejection email:", mailErr.message);
+      }
+
+      res.json({
+        message: "Partner request rejected and deleted permanently. All associated data removed.",
+        id: partner._id,
+        email: partner.email,
+      });
+    } catch (error) {
+      console.error("Error deleting Partner:", error);
+      res.status(500).json({ message: "Failed to delete Partner" });
+    }
+  }
+);
+
 // GET /asm/list-with-rm-count           -   non in use in frontend
 router.get(
   "/asm/list-with-rm-count",

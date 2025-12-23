@@ -8,7 +8,7 @@ export const APP_STATUSES = [
   "DOC_INCOMPLETE",
   "DOC_COMPLETE",
   "DOC_SUBMITTED",
-  "UNDER_REVIEW",,
+  "UNDER_REVIEW",
   "APPROVED",
   "AGREEMENT",
   "REJECTED",
@@ -37,10 +37,16 @@ const DocumentSchema = new mongoose.Schema(
     uploadedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
     status: { 
       type: String, 
-      enum: ["PENDING", "VERIFIED", "REJECTED"], 
+      enum: ["PENDING", "VERIFIED", "REJECTED", "UPDATED"], 
       default: "PENDING" 
     },
-    remarks: { type: String }
+    remarks: { type: String },
+    uploadedAt: { type: Date, default: Date.now },
+    updatedAt: { type: Date, default: Date.now },
+    verifiedAt: { type: Date },
+    rejectedAt: { type: Date },
+    verifiedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+    rejectedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
   },
   { _id: false }
 );
@@ -205,13 +211,46 @@ const ApplicationSchema = new mongoose.Schema(
 );
 
 
+// Helper function to get required document types based on loan type
+ApplicationSchema.methods.getRequiredDocTypes = function() {
+  const baseDocs = ["PAN", "AADHAR_FRONT", "AADHAR_BACK"];
+  
+  if (this.loanType === "PERSONAL" || this.loanType === "HOME_LOAN_SALARIED") {
+    return [...baseDocs, "SALARY_SLIP_1", "BANK_STATEMENT"];
+  } else if (this.loanType === "BUSINESS" || this.loanType === "HOME_LOAN_SELF_EMPLOYED") {
+    return [...baseDocs, "BANK_STATEMENT", "GST_CERTIFICATE"];
+  }
+  
+  return baseDocs;
+};
+
+// Helper function to check if all required documents are verified
+ApplicationSchema.methods.areAllDocumentsVerified = function() {
+  const requiredDocTypes = this.getRequiredDocTypes();
+  const uploadedDocs = this.docs || [];
+  
+  // Check if all required documents exist and are verified
+  for (const docType of requiredDocTypes) {
+    const doc = uploadedDocs.find(
+      (d) => d.docType?.toUpperCase() === docType.toUpperCase()
+    );
+    
+    // Document must exist and be verified
+    if (!doc || doc.status !== "VERIFIED") {
+      return false;
+    }
+  }
+  
+  return true;
+};
+
 // 🚦 State transition guard
 ApplicationSchema.methods.transition = function (to, byUserId, note) {
   const allowed = {
     DRAFT: ["SUBMITTED"],
     SUBMITTED: ["DOC_INCOMPLETE", "UNDER_REVIEW", "DOC_COMPLETE", "UNDER_REVIEW"],
     DOC_INCOMPLETE: ["DOC_COMPLETE", "REJECTED"],
-    DOC_COMPLETE: ["UNDER_REVIEW"],
+    DOC_COMPLETE: ["UNDER_REVIEW", "DOC_INCOMPLETE"], // ✅ Allow reverting to DOC_INCOMPLETE
     UNDER_REVIEW: ["APPROVED", "REJECTED"],
     APPROVED: ["AGREEMENT", "DISBURSED"],
     AGREEMENT: ["DISBURSED"],

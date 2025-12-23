@@ -20,8 +20,12 @@ import { FollowUp } from "../models/followUp.js";
 import dayjs from "dayjs";
 import { sendMail } from "../utils/sendMail.js";
 import axios from "axios";
+import { emitDocumentStatusChanged, emitApplicationStatusChanged } from "../utils/socketEmitter.js";
 
 const router = Router();
+
+// Log route registration for debugging
+console.log("✅ RM routes loaded - POST /applications/:id/docs/:docType/update-status route registered");
 
 router.post(
   "/create-partners",
@@ -281,15 +285,22 @@ router.get("/get-partners", auth, requireRole(ROLES.RM), async (req, res) => {
           dealsCount > 0 ? Math.round((successCount / dealsCount) * 100) : 0;
 
         // ===== Profile Pic =====
-        const profilePic =
-          (partner.docs || [])
-            .find((doc) => doc.docType === "SELFIE")
-            ?.url.replace(/\\/g, "/")
-            .replace(/^\/+/, "") || null;
-
-        const profilePicUrl = profilePic
-          ? `${BASE_URL.replace(/\/$/, "")}/${profilePic}`
-          : null;
+        const selfieDoc = (partner.docs || [])
+          .find((doc) => doc.docType === "SELFIE");
+        
+        let profilePicUrl = null;
+        if (selfieDoc?.url) {
+          // Check if URL already starts with http/https (absolute URL)
+          if (selfieDoc.url.startsWith("http://") || selfieDoc.url.startsWith("https://")) {
+            profilePicUrl = selfieDoc.url;
+          } else {
+            // Relative URL - prepend BASE_URL
+            const cleanPath = selfieDoc.url
+              .replace(/\\/g, "/")
+              .replace(/^\/+/, "");
+            profilePicUrl = `${BASE_URL.replace(/\/$/, "")}/${cleanPath}`;
+          }
+        }
 
         return {
           id: partner._id,
@@ -519,6 +530,44 @@ router.post(
           .status(404)
           .json({ message: "Application not found under this RM" });
 
+      // ✅ Validate DOC_COMPLETE transition - all documents must be verified
+      if (to === "DOC_COMPLETE") {
+        const requiredDocTypes = app.getRequiredDocTypes();
+        const uploadedDocs = app.docs || [];
+        const missingDocs = [];
+        const unverifiedDocs = [];
+        
+        // Check for missing or unverified documents
+        for (const docType of requiredDocTypes) {
+          const doc = uploadedDocs.find(
+            (d) => d.docType?.toUpperCase() === docType.toUpperCase()
+          );
+          
+          if (!doc) {
+            missingDocs.push(docType);
+          } else if (doc.status !== "VERIFIED") {
+            unverifiedDocs.push(`${docType} (${doc.status})`);
+          }
+        }
+        
+        if (missingDocs.length > 0 || unverifiedDocs.length > 0) {
+          let errorMessage = "Cannot set DOC_COMPLETE status. ";
+          if (missingDocs.length > 0) {
+            errorMessage += `Missing documents: ${missingDocs.join(", ")}. `;
+          }
+          if (unverifiedDocs.length > 0) {
+            errorMessage += `Unverified documents: ${unverifiedDocs.join(", ")}. `;
+          }
+          errorMessage += "Please verify all required documents first or change status to DOC_INCOMPLETE.";
+          
+          return res.status(400).json({
+            message: errorMessage,
+            missingDocs,
+            unverifiedDocs,
+          });
+        }
+      }
+
       // ✅ Only set approvedLoanAmount for DISBURSED
       if (to === "DISBURSED") {
         if (approvedLoanAmount == null || isNaN(Number(approvedLoanAmount))) {
@@ -529,15 +578,110 @@ router.post(
         app.approvedLoanAmount = Number(approvedLoanAmount);
       }
 
+      // Store old status before transition
+      const oldStatus = app.status;
+
       // Transition
       app.transition(to, req.user.sub, note);
+
+      // ✅ Auto-update document statuses based on application status change
+      const now = new Date();
+      if (to === "APPROVED" || to === "DISBURSED") {
+        // When RM approves/disburses, mark all PENDING/UPDATED documents as VERIFIED
+        app.docs.forEach((doc) => {
+          if (doc.status === "PENDING" || doc.status === "UPDATED") {
+            doc.status = "VERIFIED";
+            doc.verifiedAt = now;
+            doc.verifiedBy = req.user.sub;
+            doc.updatedAt = now;
+            // Clear rejection info if any
+            doc.rejectedAt = null;
+            doc.rejectedBy = null;
+          }
+        });
+      } else if (to === "DOC_COMPLETE") {
+        // When moving to DOC_COMPLETE, verify all PENDING/UPDATED documents
+        app.docs.forEach((doc) => {
+          if (doc.status === "PENDING" || doc.status === "UPDATED") {
+            doc.status = "VERIFIED";
+            doc.verifiedAt = now;
+            doc.verifiedBy = req.user.sub;
+            doc.updatedAt = now;
+            // Clear rejection info if any
+            doc.rejectedAt = null;
+            doc.rejectedBy = null;
+          }
+        });
+      } else if (to === "UNDER_REVIEW") {
+        // When moving to UNDER_REVIEW, mark UPDATED documents as PENDING (awaiting review)
+        app.docs.forEach((doc) => {
+          if (doc.status === "UPDATED") {
+            doc.status = "PENDING";
+            doc.updatedAt = now;
+          }
+        });
+      }
+
+      await app.save();
+
+      // Emit socket notification with action tracking
+      try {
+        // Use global.io which is set in index.js
+        const io = global.io;
+        if (io) {
+          console.log("🔔 RM Route: Emitting application status change", {
+            applicationId: app._id,
+            oldStatus,
+            newStatus: to,
+            actionBy: req.user.sub,
+          });
+
+          // Populate application for socket emission (including ASM for hierarchy)
+          await app.populate("partnerId", "firstName lastName email employeeId");
+          await app.populate("customerId", "firstName middleName lastName email phone");
+          await app.populate("rmId", "firstName lastName email employeeId asmId");
+          await app.populate("asmId", "firstName lastName email employeeId");
+          
+          console.log("📋 Application populated:", {
+            partnerId: app.partnerId?._id || app.partnerId,
+            customerId: app.customerId?._id || app.customerId,
+            rmId: app.rmId?._id || app.rmId,
+            asmId: app.asmId?._id || app.asmId || app.rmId?.asmId,
+          });
+          
+          // Ensure application IDs are properly extracted before emission
+          // The emitApplicationStatusChanged function handles ID extraction internally
+          await emitApplicationStatusChanged(
+            io,
+            app,
+            oldStatus,
+            to,
+            req.user.sub // actionBy - who performed the action
+          );
+          
+          console.log("✅ Socket emission completed");
+        } else {
+          console.error("❌ Socket io instance not available (global.io is null)");
+        }
+      } catch (socketErr) {
+        console.error("❌ Error emitting socket event:", socketErr);
+        console.error("Stack:", socketErr.stack);
+        // Don't fail the request if socket fails
+      }
+
+      // Send response immediately (don't wait for email)
+      res.json({
+        message: "Application status updated successfully",
+        status: app.status,
+        approvedLoanAmount: app.approvedLoanAmount,
+        allDocumentsVerified: app.areAllDocumentsVerified(),
+      });
 
       // ✅ If status = REJECTED → mark for auto-delete after 3 months
       if (to === "REJECTED") {
         const threeMonthsLater = new Date(
           Date.now() + 90 * 24 * 60 * 60 * 1000
         );
-
         app.deletedAt = threeMonthsLater; // Application TTL
         await User.findByIdAndUpdate(app.customerId._id, {
           deletedAt: threeMonthsLater, // Customer TTL
@@ -546,49 +690,52 @@ router.post(
 
       await app.save();
 
-      // 📧 Always send mail (for ALL statuses)
-      try {
-        let extraInfo = "";
-
-        switch (to) {
-          case "DISBURSED":
-            extraInfo = `<p><b>Approved Loan Amount:</b> ₹${app.approvedLoanAmount}</p>`;
-            break;
-          case "AGREEMENT":
-            extraInfo = `<p><b>Next Step:</b> Please review and sign your loan agreement.</p>`;
-            break;
-          case "APPROVED":
-            extraInfo = `<p>Your loan application has been approved. 🎉</p>`;
-            break;
-          case "REJECTED":
-            extraInfo = `<p>Unfortunately, your loan application has been rejected. You may reapply after 3 months.</p>`;
-            break;
-          default:
-            extraInfo = `<p>Status updated successfully.</p>`;
-        }
-
-        await sendMail({
-          to: app.customerId.email,
-          subject: `Loan Application Status: ${to}`,
-          html: `
-            <p>Dear ${app.customerId.firstName || "Customer"},</p>
-            <p>Your loan application status has been updated.</p>
-            <p><b>New Status:</b> ${to}</p>
-            ${note ? `<p><b>Remarks:</b> ${note}</p>` : ""}
-            ${extraInfo}
-            <br/>
-            <p>Thank you,<br/>Trustline Fintech</p>
-          `,
-        });
-      } catch (mailErr) {
-        console.error("Failed to send status email:", mailErr.message);
-      }
-
+      // Send response immediately (don't wait for email)
       res.json({
-        message: "Status updated",
+        message: "Application status updated successfully",
         status: app.status,
         approvedLoanAmount: app.approvedLoanAmount,
         stageHistory: app.stageHistory,
+      });
+
+      // 📧 Send email asynchronously (non-blocking)
+      setImmediate(async () => {
+        try {
+          let extraInfo = "";
+
+          switch (to) {
+            case "DISBURSED":
+              extraInfo = `<p><b>Approved Loan Amount:</b> ₹${app.approvedLoanAmount}</p>`;
+              break;
+            case "AGREEMENT":
+              extraInfo = `<p><b>Next Step:</b> Please review and sign your loan agreement.</p>`;
+              break;
+            case "APPROVED":
+              extraInfo = `<p>Your loan application has been approved. 🎉</p>`;
+              break;
+            case "REJECTED":
+              extraInfo = `<p>Unfortunately, your loan application has been rejected. You may reapply after 3 months.</p>`;
+              break;
+            default:
+              extraInfo = `<p>Status updated successfully.</p>`;
+          }
+
+          await sendMail({
+            to: app.customerId.email,
+            subject: `Loan Application Status: ${to}`,
+            html: `
+              <p>Dear ${app.customerId.firstName || "Customer"},</p>
+              <p>Your loan application status has been updated.</p>
+              <p><b>New Status:</b> ${to}</p>
+              ${note ? `<p><b>Remarks:</b> ${note}</p>` : ""}
+              ${extraInfo}
+              <br/>
+              <p>Thank you,<br/>Trustline Fintech</p>
+            `,
+          });
+        } catch (mailErr) {
+          console.error("Failed to send status email:", mailErr.message);
+        }
       });
     } catch (e) {
       console.error(e);
@@ -1461,6 +1608,429 @@ router.get(
 //     }
 //   }
 // );
+
+// ✅ Update document status (REJECTED, VERIFIED, PENDING) with remarks
+// NOTE: This route MUST be before the download route to avoid conflicts
+// Using PUT method for document status updates
+router.put(
+  "/applications/:id/docs/:docType",
+  auth,
+  requireRole(ROLES.RM),
+  async (req, res) => {
+    try {
+      const { id, docType } = req.params;
+      const { status, remarks } = req.body;
+
+      // Decode docType in case it was URL encoded (handles underscores and special chars)
+      const decodedDocType = decodeURIComponent(docType);
+      
+      console.log("PUT /applications/:id/docs/:docType called", { 
+        id, 
+        docType, 
+        decodedDocType,
+        status, 
+        remarks 
+      });
+
+      if (!status || !["PENDING", "VERIFIED", "REJECTED"].includes(status)) {
+        return res.status(400).json({
+          message: "Invalid status. Must be PENDING, VERIFIED, or REJECTED",
+        });
+      }
+
+      const app = await Application.findOne({
+        _id: id,
+        rmId: req.user.sub,
+      });
+
+      if (!app) {
+        return res.status(404).json({
+          message: "Application not found or not assigned to this RM",
+        });
+      }
+
+      // Find and update the document - handle case-insensitive matching
+      const docIndex = app.docs.findIndex(
+        (d) => d.docType.toUpperCase() === decodedDocType.toUpperCase()
+      );
+
+      console.log("Document search:", {
+        searchingFor: decodedDocType,
+        availableDocs: app.docs.map(d => d.docType),
+        foundIndex: docIndex
+      });
+
+      if (docIndex === -1) {
+        return res.status(404).json({
+          message: "Document not found",
+          docType: decodedDocType,
+          availableDocTypes: app.docs.map((d) => d.docType),
+        });
+      }
+
+      // Update document status and remarks with timestamps
+      const now = new Date();
+      const previousStatus = app.docs[docIndex].status;
+      
+      app.docs[docIndex].status = status;
+      app.docs[docIndex].updatedAt = now;
+      
+      if (remarks !== undefined) {
+        app.docs[docIndex].remarks = remarks || "";
+      }
+      
+      // Set timestamps based on status change
+      if (status === "VERIFIED") {
+        app.docs[docIndex].verifiedAt = now;
+        app.docs[docIndex].verifiedBy = req.user.sub;
+        // Clear rejected timestamps if verifying
+        app.docs[docIndex].rejectedAt = null;
+        app.docs[docIndex].rejectedBy = null;
+      } else if (status === "REJECTED") {
+        app.docs[docIndex].rejectedAt = now;
+        app.docs[docIndex].rejectedBy = req.user.sub;
+        // Clear verified timestamps if rejecting
+        app.docs[docIndex].verifiedAt = null;
+        app.docs[docIndex].verifiedBy = null;
+      } else if (status === "UPDATED") {
+        // When RM marks as UPDATED, it means partner re-uploaded and needs review
+        app.docs[docIndex].updatedAt = now;
+      }
+      
+      // If document is rejected, update application status to DOC_INCOMPLETE
+      if (status === "REJECTED" && app.status !== "DOC_INCOMPLETE") {
+        try {
+          app.transition("DOC_INCOMPLETE", req.user.sub, 
+            `Document ${decodedDocType} marked as REJECTED. ${remarks || ""}`);
+        } catch (transitionErr) {
+          // If transition fails, still update the document but log the error
+          console.error("Transition error (non-fatal):", transitionErr.message);
+          // Manually set status if transition not allowed
+          const oldStatus = app.status;
+          if (oldStatus === "DRAFT" || oldStatus === "SUBMITTED" || oldStatus === "DOC_SUBMITTED" || oldStatus === "UNDER_REVIEW") {
+            app.status = "DOC_INCOMPLETE";
+            if (!app.stageHistory) app.stageHistory = [];
+            app.stageHistory.push({
+              from: oldStatus,
+              to: "DOC_INCOMPLETE",
+              by: req.user.sub,
+              at: new Date(),
+              note: `Document ${decodedDocType} marked as REJECTED. ${remarks || ""}`
+            });
+          }
+        }
+      }
+
+      // Ensure uploadedAt exists
+      if (!app.docs[docIndex].uploadedAt) {
+        app.docs[docIndex].uploadedAt = now;
+      }
+
+      // If all documents are verified and application is DOC_INCOMPLETE, check if can move to DOC_COMPLETE
+      if (status === "VERIFIED" && app.status === "DOC_INCOMPLETE") {
+        const allDocsVerified = app.docs.every(doc => 
+          doc.status === "VERIFIED"
+        );
+        
+        if (allDocsVerified && app.docs.length > 0) {
+          try {
+            app.transition("DOC_COMPLETE", req.user.sub, 
+              "All documents have been verified");
+          } catch (transitionErr) {
+            console.error("Transition to DOC_COMPLETE error:", transitionErr.message);
+          }
+        }
+      }
+      
+      // When RM marks document as UPDATED, it means they acknowledge the re-upload
+      // This will be changed to VERIFIED or REJECTED after RM reviews
+      // When RM verifies an UPDATED document, it becomes VERIFIED
+      // When RM rejects an UPDATED document, it becomes REJECTED (partner needs to re-upload again)
+
+      await app.save();
+
+      // Emit socket notification with action tracking
+      try {
+        // Use global.io which is set in index.js
+        const io = global.io;
+        if (io) {
+          console.log("🔔 RM Route: Emitting document status change", {
+            applicationId: app._id,
+            docType: decodedDocType,
+            status,
+            actionBy: req.user.sub,
+          });
+
+          // Populate application data for detailed notification
+          await app.populate("customerId", "firstName middleName lastName email phone");
+          await app.populate("partnerId", "firstName lastName email employeeId");
+          await app.populate("rmId", "firstName lastName asmId");
+          // Get ASM ID from RM if available
+          if (app.rmId?.asmId) {
+            app.asmId = app.rmId.asmId;
+          }
+          
+          // Extract IDs properly - handle both populated objects and plain IDs
+          const partnerIdForSocket = app.partnerId?._id?.toString() || app.partnerId?.toString() || (app.partnerId ? String(app.partnerId) : null);
+          const customerIdForSocket = app.customerId?._id?.toString() || app.customerId?.toString() || (app.customerId ? String(app.customerId) : null);
+          
+          console.log("🔔 RM Route: Extracted IDs for socket", {
+            partnerId: partnerIdForSocket,
+            customerId: customerIdForSocket,
+            partnerIdType: typeof app.partnerId,
+            customerIdType: typeof app.customerId,
+          });
+          
+          await emitDocumentStatusChanged(
+            io,
+            app._id.toString(),
+            decodedDocType,
+            status,
+            req.user.sub,
+            partnerIdForSocket,
+            customerIdForSocket,
+            req.user.sub, // actionBy - who performed the action
+            app // pass application object for details
+          );
+          
+          console.log("✅ Document status socket emission completed");
+        } else {
+          console.error("❌ Socket io instance not available (global.io is null)");
+        }
+      } catch (socketErr) {
+        console.error("❌ Error emitting socket event:", socketErr);
+        console.error("Stack:", socketErr.stack);
+        // Don't fail the request if socket fails
+      }
+
+      // Send response immediately (don't wait for email)
+      res.json({
+        message: "Document status updated successfully",
+        document: app.docs[docIndex],
+        applicationStatus: app.status,
+        allDocumentsVerified: app.docs.every(doc => doc.status === "VERIFIED"),
+      });
+
+      // Send email notification asynchronously (non-blocking)
+      setImmediate(async () => {
+        try {
+          const partner = await User.findById(app.partnerId).lean();
+          if (partner && partner.email) {
+            const statusMessage = status === "REJECTED" 
+              ? "has been REJECTED and needs to be re-uploaded"
+              : status === "VERIFIED"
+              ? "has been VERIFIED"
+              : status === "UPDATED"
+              ? "has been marked as UPDATED and is under review"
+              : "status has been updated to PENDING";
+            
+            await sendMail({
+              to: partner.email,
+              subject: `Document Status Update - ${decodedDocType}`,
+              html: `
+                <p>Dear ${partner.firstName || "Partner"},</p>
+                <p>The document <strong>${decodedDocType}</strong> for application <strong>${app.appNo}</strong> ${statusMessage}.</p>
+                ${remarks ? `<p><b>Remarks from RM:</b> ${remarks}</p>` : ""}
+                ${status === "REJECTED" ? `<p>Please re-upload this document through the application form.</p>` : ""}
+                <br/>
+                <p>Thank you,<br/>Trustline Fintech</p>
+              `,
+            });
+          }
+        } catch (mailErr) {
+          console.error("Failed to send email notification:", mailErr.message);
+          // Don't fail the request if email fails
+        }
+      });
+    } catch (err) {
+      console.error("Error updating document status:", err);
+      res.status(500).json({
+        message: "Error updating document status",
+        error: err.message,
+      });
+    }
+  }
+);
+
+// Alternative POST route for document status update (in case PUT doesn't work)
+// Route: POST /rm/applications/:id/docs/:docType/update-status
+router.post(
+  "/applications/:id/docs/:docType/update-status",
+  auth,
+  requireRole(ROLES.RM),
+  async (req, res) => {
+    try {
+      const { id, docType } = req.params;
+      const { status, remarks } = req.body;
+
+      // Decode docType in case it was URL encoded
+      const decodedDocType = decodeURIComponent(docType);
+      
+      console.log("POST /applications/:id/docs/:docType/update-status called", {
+        id,
+        docType,
+        decodedDocType,
+        status,
+        remarks
+      });
+
+      if (!status || !["PENDING", "VERIFIED", "REJECTED"].includes(status)) {
+        return res.status(400).json({
+          message: "Invalid status. Must be PENDING, VERIFIED, or REJECTED",
+        });
+      }
+
+      const app = await Application.findOne({
+        _id: id,
+        rmId: req.user.sub,
+      });
+
+      if (!app) {
+        console.log("Application not found", { id, rmId: req.user.sub });
+        return res.status(404).json({
+          message: "Application not found or not assigned to this RM",
+        });
+      }
+
+      const docIndex = app.docs.findIndex(
+        (d) => d.docType.toUpperCase() === decodedDocType.toUpperCase()
+      );
+
+      if (docIndex === -1) {
+        return res.status(404).json({
+          message: "Document not found",
+          docType: decodedDocType,
+          availableDocTypes: app.docs.map((d) => d.docType),
+        });
+      }
+
+      app.docs[docIndex].status = status;
+      if (remarks !== undefined) {
+        app.docs[docIndex].remarks = remarks || "";
+      }
+      
+      if (status === "REJECTED" && app.status !== "DOC_INCOMPLETE") {
+        try {
+          app.transition("DOC_INCOMPLETE", req.user.sub, 
+            `Document ${decodedDocType} marked as REJECTED. ${remarks || ""}`);
+        } catch (transitionErr) {
+          console.error("Transition error (non-fatal):", transitionErr.message);
+          const oldStatus = app.status;
+          if (oldStatus === "DRAFT" || oldStatus === "SUBMITTED" || oldStatus === "DOC_SUBMITTED" || oldStatus === "UNDER_REVIEW") {
+            app.status = "DOC_INCOMPLETE";
+            if (!app.stageHistory) app.stageHistory = [];
+            app.stageHistory.push({
+              from: oldStatus,
+              to: "DOC_INCOMPLETE",
+              by: req.user.sub,
+              at: new Date(),
+              note: `Document ${decodedDocType} marked as REJECTED. ${remarks || ""}`
+            });
+          }
+        }
+      }
+
+      if (!app.docs[docIndex].uploadedAt) {
+        app.docs[docIndex].uploadedAt = new Date();
+      }
+
+      await app.save();
+
+      // Send email notification to partner
+      try {
+        const partner = await User.findById(app.partnerId).lean();
+        if (partner && partner.email) {
+          const statusMessage = status === "REJECTED" 
+            ? "has been REJECTED and needs to be re-uploaded"
+            : status === "VERIFIED"
+            ? "has been VERIFIED"
+            : "status has been updated to PENDING";
+          
+          await sendMail({
+            to: partner.email,
+            subject: `Document Status Update - ${decodedDocType}`,
+            html: `
+              <p>Dear ${partner.firstName || "Partner"},</p>
+              <p>The document <strong>${decodedDocType}</strong> for application <strong>${app.appNo}</strong> ${statusMessage}.</p>
+              ${remarks ? `<p><b>Remarks from RM:</b> ${remarks}</p>` : ""}
+              ${status === "REJECTED" ? `<p>Please re-upload this document through the application form.</p>` : ""}
+              <br/>
+              <p>Thank you,<br/>Trustline Fintech</p>
+            `,
+          });
+        }
+      } catch (mailErr) {
+        console.error("Failed to send email notification:", mailErr.message);
+      }
+
+      // Emit socket notification with action tracking
+      try {
+        // Use global.io which is set in index.js
+        const io = global.io;
+        if (io) {
+          console.log("🔔 RM Route: Emitting document status change", {
+            applicationId: app._id,
+            docType: decodedDocType,
+            status,
+            actionBy: req.user.sub,
+          });
+
+          // Populate application data for detailed notification
+          await app.populate("customerId", "firstName middleName lastName email phone");
+          await app.populate("partnerId", "firstName lastName email employeeId");
+          await app.populate("rmId", "firstName lastName asmId");
+          // Get ASM ID from RM if available
+          if (app.rmId?.asmId) {
+            app.asmId = app.rmId.asmId;
+          }
+          
+          // Extract IDs properly - handle both populated objects and plain IDs
+          const partnerIdForSocket = app.partnerId?._id?.toString() || app.partnerId?.toString() || (app.partnerId ? String(app.partnerId) : null);
+          const customerIdForSocket = app.customerId?._id?.toString() || app.customerId?.toString() || (app.customerId ? String(app.customerId) : null);
+          
+          console.log("🔔 RM Route: Extracted IDs for socket", {
+            partnerId: partnerIdForSocket,
+            customerId: customerIdForSocket,
+            partnerIdType: typeof app.partnerId,
+            customerIdType: typeof app.customerId,
+          });
+          
+          await emitDocumentStatusChanged(
+            io,
+            app._id.toString(),
+            decodedDocType,
+            status,
+            req.user.sub,
+            partnerIdForSocket,
+            customerIdForSocket,
+            req.user.sub, // actionBy - who performed the action
+            app // pass application object for details
+          );
+          
+          console.log("✅ Document status socket emission completed");
+        } else {
+          console.error("❌ Socket io instance not available (global.io is null)");
+        }
+      } catch (socketErr) {
+        console.error("❌ Error emitting socket event:", socketErr);
+        console.error("Stack:", socketErr.stack);
+        // Don't fail the request if socket fails
+      }
+
+      res.json({
+        message: "Document status updated successfully",
+        document: app.docs[docIndex],
+        applicationStatus: app.status,
+      });
+    } catch (err) {
+      console.error("Error updating document status (POST):", err);
+      res.status(500).json({
+        message: "Error updating document status",
+        error: err.message,
+      });
+    }
+  }
+);
 
 // Download all documents as ZIP
 

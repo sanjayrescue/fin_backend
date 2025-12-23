@@ -478,11 +478,26 @@ router.post(
         existingApp &&
         ["DRAFT", "DOC_INCOMPLETE"].includes(existingApp.status)
       ) {
-        // Update existing application
+        // Update existing application - replace/re-add documents
         const docsMap = new Map();
 
-        for (const d of existingApp.docs) docsMap.set(d.docType, d);
-        for (const nd of newDocs) docsMap.set(nd.docType, nd);
+        // Keep existing docs first
+        for (const d of existingApp.docs) docsMap.set(d.docType.toUpperCase(), d);
+        
+        // Replace with new docs (re-uploaded documents replace old ones)
+        for (const nd of newDocs) {
+          const existingDoc = docsMap.get(nd.docType.toUpperCase());
+          if (existingDoc) {
+            // Replace existing document - update URL and reset status to PENDING
+            existingDoc.url = nd.url;
+            existingDoc.status = "PENDING"; // Reset status when re-uploaded
+            existingDoc.remarks = ""; // Clear remarks when re-uploaded
+            existingDoc.uploadedBy = userId;
+          } else {
+            // New document
+            docsMap.set(nd.docType.toUpperCase(), nd);
+          }
+        }
 
         existingApp.docs = Array.from(docsMap.values());
         existingApp.customer = { ...existingApp.customer, ...customerData };
@@ -493,7 +508,10 @@ router.post(
         existingApp.references = refs;
         existingApp.partnerId = assignedPartnerId;
         existingApp.rmId = assignedRmId;
-        existingApp.status = "DRAFT";
+        // Keep DOC_INCOMPLETE status if it was DOC_INCOMPLETE, otherwise set to DRAFT
+        if (existingApp.status !== "DOC_INCOMPLETE") {
+          existingApp.status = "DRAFT";
+        }
 
         await existingApp.save();
 
@@ -790,11 +808,26 @@ router.post(
         existingApp &&
         ["DRAFT", "DOC_INCOMPLETE"].includes(existingApp.status)
       ) {
-        // Update existing application
+        // Update existing application - replace/re-add documents
         const docsMap = new Map();
 
-        for (const d of existingApp.docs) docsMap.set(d.docType, d);
-        for (const nd of newDocs) docsMap.set(nd.docType, nd);
+        // Keep existing docs first
+        for (const d of existingApp.docs) docsMap.set(d.docType.toUpperCase(), d);
+        
+        // Replace with new docs (re-uploaded documents replace old ones)
+        for (const nd of newDocs) {
+          const existingDoc = docsMap.get(nd.docType.toUpperCase());
+          if (existingDoc) {
+            // Replace existing document - update URL and reset status to PENDING
+            existingDoc.url = nd.url;
+            existingDoc.status = "PENDING"; // Reset status when re-uploaded
+            existingDoc.remarks = ""; // Clear remarks when re-uploaded
+            existingDoc.uploadedBy = userId;
+          } else {
+            // New document
+            docsMap.set(nd.docType.toUpperCase(), nd);
+          }
+        }
 
         existingApp.docs = Array.from(docsMap.values());
         existingApp.customer = { ...existingApp.customer, ...customerData };
@@ -805,7 +838,10 @@ router.post(
         existingApp.references = refs;
         existingApp.partnerId = assignedPartnerId;
         existingApp.rmId = assignedRmId;
-        existingApp.status = "DRAFT";
+        // Keep DOC_INCOMPLETE status if it was DOC_INCOMPLETE, otherwise set to DRAFT
+        if (existingApp.status !== "DOC_INCOMPLETE") {
+          existingApp.status = "DRAFT";
+        }
 
         await existingApp.save();
 
@@ -1045,7 +1081,7 @@ router.get("/customers", auth, requireRole(ROLES.PARTNER), async (req, res) => {
       return acc;
     }, {});
 
-    // Map customers list with application summary + payout amount
+    // Map customers list with application summary + payout amount + documents
     const customers = applications.map((app) => ({
       customerId: app.customerId?._id,
       customerEmployeeId: app.customerId?.employeeId || null,
@@ -1059,6 +1095,7 @@ router.get("/customers", auth, requireRole(ROLES.PARTNER), async (req, res) => {
       approvedAmount: app.approvedLoanAmount || null,
       status: app.status,
       payoutAmount: payoutMap[app._id.toString()] || 0, // ✅ only payout amount
+      docs: app.docs || [], // ✅ Include documents for incomplete doc tracking
       rm: {
         rmId: app.rmId?._id,
         name: `${app.rmId?.firstName ?? ""} ${app.rmId?.lastName ?? ""}`.trim(),
@@ -1265,6 +1302,45 @@ router.get("/dashboard", auth, requireRole(ROLES.PARTNER), async (req, res) => {
       });
     }
 
+    // Calculate current month earning
+    const currentMonthName = monthNames[currentMonth - 1];
+    const currentMonthPayout = monthlyPayoutAgg.find(
+      (p) => p._id.year === currentYear && p._id.month === currentMonth
+    );
+    const currentMonthEarning = currentMonthPayout ? currentMonthPayout.total : 0;
+
+    // Build all years earnings array (for lifetime earnings breakdown)
+    // Group by year and sum all months for each year
+    const yearlyPayoutAgg = await Payout.aggregate([
+      {
+        $match: {
+          partnerId: new mongoose.Types.ObjectId(partnerId),
+          payOutStatus: "DONE",
+        },
+      },
+      {
+        $project: {
+          amount: 1,
+          year: { $year: "$createdAt" },
+        },
+      },
+      {
+        $group: {
+          _id: { year: "$year" },
+          total: { $sum: "$amount" },
+        },
+      },
+      {
+        $sort: { "_id.year": 1 }, // Sort by year ascending (oldest first)
+      },
+    ]);
+
+    // Format yearly payouts
+    const allYearsPayouts = yearlyPayoutAgg.map((item) => ({
+      year: item._id.year.toString(),
+      earning: item.total || 0,
+    }));
+
     // ------------------
     // 4️⃣ Monthly target & achieved
     // ------------------
@@ -1398,6 +1474,8 @@ router.get("/dashboard", auth, requireRole(ROLES.PARTNER), async (req, res) => {
       // monthlyPerformance,
       monthlyTargets,
       monthlyPayouts: last3MonthsPayouts, // Last 3 months payout breakdown
+      allYearsPayouts, // All years payout breakdown for lifetime earnings
+      currentMonthEarning, // Current month earning
     });
   } catch (err) {
     console.error("Partner dashboard error:", err);
@@ -1846,6 +1924,278 @@ router.patch(
       });
     } catch (err) {
       console.error("Error updating bank details:", err);
+      res.status(500).json({ message: err.message });
+    }
+  }
+);
+
+// ✅ Upload document for an application
+router.post(
+  "/applications/:id/documents",
+  auth,
+  requireRole(ROLES.PARTNER),
+  (req, res, next) => {
+    // Log request details for debugging
+    console.log('Upload request received:', {
+      method: req.method,
+      contentType: req.headers['content-type'],
+      contentLength: req.headers['content-length'],
+      hasBody: !!req.body,
+      bodyKeys: Object.keys(req.body || {}),
+    });
+    next();
+  },
+  upload.single("file"),
+  async (req, res) => {
+    try {
+      const partnerId = req.user.sub;
+      const { id } = req.params;
+      const { docType } = req.query;
+
+      console.log('Document upload request:', {
+        partnerId,
+        applicationId: id,
+        docType,
+        hasFile: !!req.file,
+        fileInfo: req.file ? {
+          originalname: req.file.originalname,
+          mimetype: req.file.mimetype,
+          size: req.file.size,
+        } : null,
+        contentType: req.headers['content-type'],
+      });
+
+      if (!docType) {
+        return res.status(400).json({ message: "docType is required" });
+      }
+
+      if (!req.file) {
+        console.error('No file received in request');
+        return res.status(400).json({ 
+          message: "File is required",
+          receivedFields: Object.keys(req.body || {}),
+          contentType: req.headers['content-type'],
+        });
+      }
+
+      // Find application belonging to this partner
+      const application = await Application.findOne({
+        _id: id,
+        partnerId,
+      });
+
+      if (!application) {
+        return res.status(404).json({
+          message: "Application not found or not accessible",
+        });
+      }
+
+      // Add or update document
+      const docIndex = application.docs.findIndex(
+        (doc) => doc.docType?.toUpperCase() === docType.toUpperCase()
+      );
+
+      const now = new Date();
+      const isUpdate = docIndex >= 0;
+      const previousStatus = isUpdate ? application.docs[docIndex].status : null;
+      const previousDoc = isUpdate ? application.docs[docIndex] : null;
+
+      // When partner uploads/re-uploads, always set to UPDATED to indicate:
+      // - Partner has uploaded/updated the document
+      // - RM verification is pending
+      let newStatus = "UPDATED"; // All partner uploads show as UPDATED (RM verification pending)
+
+      const newDoc = {
+        docType: docType.toUpperCase(),
+        url: req.file.location || req.file.path,
+        uploadedBy: partnerId,
+        status: newStatus,
+        uploadedAt: isUpdate && previousDoc?.uploadedAt ? previousDoc.uploadedAt : now, // Keep original upload date if exists
+        updatedAt: now, // Always update this timestamp
+        remarks: isUpdate && previousStatus === "REJECTED" ? "" : (previousDoc?.remarks || ""), // Clear remarks if re-uploading rejected doc
+        verifiedAt: isUpdate && previousStatus === "VERIFIED" ? previousDoc.verifiedAt : null, // Keep if was verified
+        rejectedAt: isUpdate && previousStatus === "REJECTED" ? null : previousDoc?.rejectedAt, // Clear if re-uploading rejected
+        verifiedBy: isUpdate && previousStatus === "VERIFIED" ? previousDoc.verifiedBy : null,
+        rejectedBy: isUpdate && previousStatus === "REJECTED" ? null : previousDoc?.rejectedBy, // Clear if re-uploading rejected
+      };
+
+      if (docIndex >= 0) {
+        application.docs[docIndex] = newDoc;
+      } else {
+        application.docs.push(newDoc);
+      }
+
+      // If application was DOC_INCOMPLETE and partner is re-uploading, keep status as DOC_INCOMPLETE
+      // (RM will review and change status accordingly)
+      // If document was UPDATED and partner re-uploads, it stays UPDATED for RM review
+      
+      await application.save();
+
+      console.log('Document uploaded successfully:', {
+        docType: newDoc.docType,
+        status: newDoc.status,
+        url: newDoc.url,
+      });
+
+      // Send response immediately (don't wait for email)
+      res.json({
+        message: "Document uploaded successfully. Status set to UPDATED - RM verification pending.",
+        document: newDoc,
+        isUpdate: isUpdate,
+        previousStatus: previousStatus,
+      });
+
+      // Send notification email to RM asynchronously (non-blocking)
+      setImmediate(async () => {
+        try {
+          const rm = await User.findById(application.rmId).lean();
+          if (rm && rm.email) {
+            await sendMail({
+              to: rm.email,
+              subject: `Document ${isUpdate ? 'Updated' : 'Uploaded'} - ${docType} - Verification Pending`,
+              html: `
+                <p>Dear ${rm.firstName || "RM"},</p>
+                <p>The document <strong>${docType}</strong> for application <strong>${application.appNo}</strong> has been ${isUpdate ? 'updated' : 'uploaded'} by the partner.</p>
+                <p><b>Status:</b> UPDATED (Partner has uploaded - RM verification pending)</p>
+                ${isUpdate && previousStatus === "REJECTED" ? `<p><b>Note:</b> This document was previously rejected and has been re-uploaded. Please review.</p>` : ''}
+                <p>Please review and verify the document in the application management system.</p>
+                <br/>
+                <p>Thank you,<br/>Trustline Fintech</p>
+              `,
+            });
+          }
+        } catch (mailErr) {
+          console.error("Failed to send email notification to RM:", mailErr.message);
+          // Don't fail the request if email fails
+        }
+      });
+    } catch (err) {
+      console.error("Error uploading document:", err);
+      console.error("Error stack:", err.stack);
+      
+      // Handle multer errors specifically
+      if (err instanceof multer.MulterError || err.code === 'LIMIT_FILE_SIZE') {
+        if (err.code === 'LIMIT_FILE_SIZE') {
+          return res.status(400).json({ 
+            message: "File too large. Maximum size is 20MB" 
+          });
+        }
+        return res.status(400).json({ 
+          message: `Upload error: ${err.message}` 
+        });
+      }
+      
+      res.status(500).json({ 
+        message: err.message || "Internal server error",
+        error: process.env.NODE_ENV === 'development' ? err.stack : undefined,
+      });
+    }
+  },
+  // Error handling middleware for multer
+  (err, req, res, next) => {
+    if (err instanceof multer.MulterError) {
+      console.error('Multer error:', err);
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        return res.status(400).json({ 
+          message: "File too large. Maximum size is 20MB" 
+        });
+      }
+      return res.status(400).json({ 
+        message: `Upload error: ${err.message}` 
+      });
+    }
+    if (err) {
+      console.error('Upload middleware error:', err);
+      return res.status(400).json({ 
+        message: err.message || "File upload error" 
+      });
+    }
+    next();
+  }
+);
+
+// ✅ Update employment info for an application
+router.put(
+  "/applications/:id/employment-info",
+  auth,
+  requireRole(ROLES.PARTNER),
+  async (req, res) => {
+    try {
+      const partnerId = req.user.sub;
+      const { id } = req.params;
+      const { companyName, currentExperience, designation, monthlySalary } = req.body;
+
+      // Find application belonging to this partner
+      const application = await Application.findOne({
+        _id: id,
+        partnerId,
+      });
+
+      if (!application) {
+        return res.status(404).json({
+          message: "Application not found or not accessible",
+        });
+      }
+
+      // Update employment info
+      if (!application.employmentInfo) {
+        application.employmentInfo = {};
+      }
+
+      if (companyName) application.employmentInfo.companyName = companyName;
+      if (currentExperience) application.employmentInfo.currentExperience = currentExperience;
+      if (designation) application.employmentInfo.designation = designation;
+      if (monthlySalary) application.employmentInfo.monthlySalary = monthlySalary;
+
+      await application.save();
+
+      res.json({
+        message: "Employment info updated successfully",
+        employmentInfo: application.employmentInfo,
+      });
+    } catch (err) {
+      console.error("Error updating employment info:", err);
+      res.status(500).json({ message: err.message });
+    }
+  }
+);
+
+// ✅ Get incomplete applications by loan type
+router.get(
+  "/applications/incomplete/:loanType",
+  auth,
+  requireRole(ROLES.PARTNER),
+  async (req, res) => {
+    try {
+      const partnerId = req.user.sub;
+      const { loanType } = req.params;
+
+      const applications = await Application.find({
+        partnerId,
+        loanType: loanType.toUpperCase(),
+        status: "DOC_INCOMPLETE",
+        deletedAt: null,
+      })
+        .populate("customerId", "firstName lastName email phone")
+        .lean();
+
+      const formatted = applications.map((app) => ({
+        applicationId: app._id,
+        customerId: app.customerId?._id,
+        customerName: `${app.customerId?.firstName || ""} ${
+          app.customerId?.lastName || ""
+        }`.trim(),
+        contact: app.customerId?.phone || null,
+        email: app.customerId?.email || null,
+        loanType: app.loanType,
+        status: app.status,
+        docs: app.docs || [],
+        createdAt: app.createdAt,
+      }));
+
+      res.json(formatted);
+    } catch (err) {
+      console.error("Error fetching incomplete applications:", err);
       res.status(500).json({ message: err.message });
     }
   }
