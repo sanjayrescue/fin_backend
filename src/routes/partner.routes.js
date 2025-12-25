@@ -1610,6 +1610,13 @@ router.get("/profile", auth, requireRole(ROLES.PARTNER), async (req, res) => {
       }/LoginPage?ref=${partner?.partnerCode}`,
       status: partner.status,
 
+      // Bank/KYC Details
+      bankName: partner.bankName || null,
+      accountHolderName: partner.accountHolderName || null,
+      accountNumber: partner.accountNumber || null,
+      ifscCode: partner.ifscCode || null,
+      registeredMobile: partner.registeredMobile || null,
+
       rmId: partner.rmId?._id || null,
       rmName: partner.rmId
         ? `${partner.rmId.firstName} ${partner.rmId.lastName}`
@@ -1901,16 +1908,19 @@ router.patch(
         registeredMobile,
       } = req.body;
 
+      // Build update object with only provided fields
+      const updateData = {};
+      
+      if (bankName !== undefined) updateData.bankName = bankName;
+      if (accountHolderName !== undefined) updateData.accountHolderName = accountHolderName;
+      if (accountNumber !== undefined) updateData.accountNumber = accountNumber;
+      if (ifscCode !== undefined) updateData.ifscCode = ifscCode;
+      if (registeredMobile !== undefined) updateData.registeredMobile = registeredMobile;
+
       const updated = await User.findOneAndUpdate(
         { _id: req.user.sub, role: ROLES.PARTNER },
         {
-          $set: {
-            bankName,
-            accountHolderName,
-            accountNumber,
-            ifscCode,
-            registeredMobile,
-          },
+          $set: updateData,
         },
         { new: true, runValidators: true, projection: "-passwordHash" }
       );

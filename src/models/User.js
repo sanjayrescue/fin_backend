@@ -63,6 +63,7 @@ const userSchema = new mongoose.Schema(
     accountNumber: { type: String, trim: true },
     ifscCode: { type: String, trim: true },
     accountHolderName: { type: String, trim: true },
+    registeredMobile: { type: String, trim: true },
 
     // Role & hierarchy
     role: { type: String, enum: ALL_ROLES, required: true },
