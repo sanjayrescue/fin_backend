@@ -1,7 +1,7 @@
 import { MongoClient } from "mongodb";
 
-const localUri = "mongodb://127.0.0.1:27017/fintech_auth"; 
-const atlasUri = "mongodb+srv://sanjaygawai:12345@cluster0.tiyza.mongodb.net/";
+const localUri = "mongodb://127.0.0.1:27017/fintech_db"; 
+const atlasUri = "mongodb+srv://bagadanil09_db_user:862405@cluster0.t9huxno.mongodb.net/trustlinedb?retryWrites=true&w=majority";
 
 const localClient = new MongoClient(localUri);
 const atlasClient = new MongoClient(atlasUri);

@@ -1128,22 +1128,31 @@ router.get("/dashboard", auth, requireRole(ROLES.RM), async (req, res) => {
       status: "ACTIVE",
     });
 
-    // Customers under RM
-    const customers = await Application.distinct("customerId", { rmId });
+    // Customers under RM (including from partners)
+    const customers = await Application.distinct("customerId", {
+      $or: [
+        { rmId: rmId }, // Direct RM assignment
+        { partnerId: { $in: partnerIds } } // Applications from partners under this RM
+      ]
+    });
     const totalCustomers = customers.length;
 
-    // In-process applications
+    // In-process applications (including from partners)
     const inProcessApplications = await Application.countDocuments({
-      rmId,
-      status: "UNDER_REVIEW",
+      $or: [
+        { rmId: rmId, status: "UNDER_REVIEW" }, // Direct RM assignment
+        { partnerId: { $in: partnerIds }, status: "UNDER_REVIEW" } // Applications from partners
+      ]
     });
 
-    // Revenue
+    // Revenue (including from partners)
     const revenueAgg = await Application.aggregate([
       {
         $match: {
-          rmId: new mongoose.Types.ObjectId(rmId),
-          status: "DISBURSED",
+          $or: [
+            { rmId: new mongoose.Types.ObjectId(rmId), status: "DISBURSED" },
+            { partnerId: { $in: partnerIds }, status: "DISBURSED" }
+          ]
         },
       },
       {
@@ -1183,13 +1192,14 @@ router.get("/dashboard", auth, requireRole(ROLES.RM), async (req, res) => {
       { $sort: { "_id.month": 1 } },
     ]);
 
-    // Monthly Achieved from Applications under RM
+    // Monthly Achieved from Applications under RM (including from partners)
     const monthlyAchieved = await Application.aggregate([
       {
         $match: {
-          rmId: new mongoose.Types.ObjectId(rmId),
-          status: "DISBURSED",
-          createdAt: { $gte: startOfYear },
+          $or: [
+            { rmId: new mongoose.Types.ObjectId(rmId), status: "DISBURSED", createdAt: { $gte: startOfYear } },
+            { partnerId: { $in: partnerIds }, status: "DISBURSED", createdAt: { $gte: startOfYear } }
+          ]
         },
       },
       {
@@ -1215,9 +1225,14 @@ router.get("/dashboard", auth, requireRole(ROLES.RM), async (req, res) => {
       return { month: monthNames[i], target: t, achieved: a };
     });
 
-    // High-value customers (top 10 disbursed loans)
+    // High-value customers (top 10 disbursed loans, including from partners)
     const highValueCustomers = await Application.aggregate([
-      { $match: { rmId: new mongoose.Types.ObjectId(rmId), status: "DISBURSED" } },
+      { $match: { 
+        $or: [
+          { rmId: new mongoose.Types.ObjectId(rmId), status: "DISBURSED" },
+          { partnerId: { $in: partnerIds }, status: "DISBURSED" }
+        ]
+      } },
       { $group: { _id: "$customerId", maxLoan: { $max: { $toDouble: "$approvedLoanAmount" } }, latestApp: { $first: "$$ROOT" } } },
       { $sort: { maxLoan: -1 } },
       { $limit: 10 },
@@ -1234,9 +1249,14 @@ router.get("/dashboard", auth, requireRole(ROLES.RM), async (req, res) => {
       }
     ]);
 
-    // Sales pipeline (UNDER_REVIEW applications)
+    // Sales pipeline (UNDER_REVIEW applications, including from partners)
     const salesPipeline = await Application.aggregate([
-      { $match: { rmId: new mongoose.Types.ObjectId(rmId), status: "UNDER_REVIEW" } },
+      { $match: { 
+        $or: [
+          { rmId: new mongoose.Types.ObjectId(rmId), status: "UNDER_REVIEW" },
+          { partnerId: { $in: partnerIds }, status: "UNDER_REVIEW" }
+        ]
+      } },
       { $addFields: { requestedAmountNum: { $ifNull: ["$customer.loanAmount", 0] } } },
       { $sort: { requestedAmountNum: -1, createdAt: -1 } },
       { $group: { _id: "$customerId", maxLoan: { $first: "$requestedAmountNum" }, latestApp: { $first: "$$ROOT" } } },
@@ -1279,8 +1299,22 @@ router.get("/customers", auth, requireRole(ROLES.RM), async (req, res) => {
   try {
     const rmId = req.user.sub; // RM logged in
 
-    // Find all applications under this RM
-    const applications = await Application.find({ rmId })
+    // Get all partners under this RM
+    const partners = await User.find({ 
+      rmId: rmId, 
+      role: ROLES.PARTNER 
+    }).select("_id").lean();
+    const partnerIds = partners.map(p => p._id);
+
+    // Find all applications under this RM:
+    // 1. Applications where rmId directly matches, OR
+    // 2. Applications from partners under this RM (even if rmId wasn't set on application)
+    const applications = await Application.find({
+      $or: [
+        { rmId: rmId }, // Direct RM assignment
+        { partnerId: { $in: partnerIds } } // Applications from partners under this RM
+      ]
+    })
       .populate("customerId", "employeeId firstName lastName email phone") // ✅ get employeeId from User
       .populate("partnerId", "firstName lastName email phone")
       .lean();
@@ -1337,8 +1371,22 @@ router.get(
     try {
       const rmId = req.user.sub;
 
-      // Fetch all applications under this RM
-      const applications = await Application.find({ rmId })
+      // Get all partners under this RM
+      const partners = await User.find({ 
+        rmId: rmId, 
+        role: ROLES.PARTNER 
+      }).select("_id").lean();
+      const partnerIds = partners.map(p => p._id);
+
+      // Fetch all applications under this RM:
+      // 1. Applications where rmId directly matches, OR
+      // 2. Applications from partners under this RM
+      const applications = await Application.find({
+        $or: [
+          { rmId: rmId }, // Direct RM assignment
+          { partnerId: { $in: partnerIds } } // Applications from partners under this RM
+        ]
+      })
         .populate("customerId", "employeeId firstName lastName email phone")
         .populate("partnerId", "firstName lastName email phone")
         .lean();
@@ -1402,7 +1450,22 @@ router.get(
     try {
       const rmId = req.user.sub;
 
-      const applications = await Application.find({ rmId })
+      // Get all partners under this RM
+      const partners = await User.find({ 
+        rmId: rmId, 
+        role: ROLES.PARTNER 
+      }).select("_id").lean();
+      const partnerIds = partners.map(p => p._id);
+
+      // Fetch all applications under this RM:
+      // 1. Applications where rmId directly matches, OR
+      // 2. Applications from partners under this RM
+      const applications = await Application.find({
+        $or: [
+          { rmId: rmId }, // Direct RM assignment
+          { partnerId: { $in: partnerIds } } // Applications from partners under this RM
+        ]
+      })
         .populate("customerId", "employeeId firstName lastName email phone")
         .populate("partnerId", "firstName lastName email phone")
         .lean();
@@ -2363,7 +2426,21 @@ router.get(
       const { id } = req.params;
       const rmId = req.user.sub;
 
-      const app = await Application.findOne({ _id: id, rmId }).lean();
+      // Get all partners under this RM
+      const partners = await User.find({ 
+        rmId: rmId, 
+        role: ROLES.PARTNER 
+      }).select("_id").lean();
+      const partnerIds = partners.map(p => p._id);
+
+      // Check if application belongs to this RM or a partner under this RM
+      const app = await Application.findOne({
+        _id: id,
+        $or: [
+          { rmId: rmId }, // Direct RM assignment
+          { partnerId: { $in: partnerIds } } // Applications from partners under this RM
+        ]
+      }).lean();
       if (!app) {
         return res
           .status(404)
