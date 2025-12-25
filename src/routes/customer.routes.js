@@ -90,17 +90,44 @@ router.post(
       if (!customerUser) {
         tempPassword =
           customer.password || `Cus@${Math.random().toString(36).slice(2, 10)}`;
-        customerUser = await User.create({
-          employeeId: await generateEmployeeId("CUSTOMER"),
-          firstName: customer.firstName,
-          lastName: customer.lastName || "",
-          email: customer.email.toLowerCase(),
-          phone: customer.phone,
-          password: customer.password,
-          passwordHash: await argon2.hash(customer.password || tempPassword),
-          role: ROLES.CUSTOMER,
-          status: "ACTIVE",
-        });
+        
+        // ✅ CRITICAL: Retry logic to handle duplicate employeeId race conditions
+        let retries = 0;
+        const maxRetries = 5;
+        let created = false;
+        
+        while (!created && retries < maxRetries) {
+          try {
+            const employeeId = await generateEmployeeId("CUSTOMER");
+            customerUser = await User.create({
+              employeeId,
+              firstName: customer.firstName,
+              lastName: customer.lastName || "",
+              email: customer.email.toLowerCase(),
+              phone: customer.phone,
+              password: customer.password,
+              passwordHash: await argon2.hash(customer.password || tempPassword),
+              role: ROLES.CUSTOMER,
+              status: "ACTIVE",
+            });
+            created = true;
+            console.log(`✅ Customer created with unique employeeId: ${employeeId}`);
+          } catch (createError) {
+            // Handle duplicate key error (E11000)
+            if (createError.code === 11000 && createError.keyPattern?.employeeId) {
+              retries++;
+              console.warn(`⚠️ Duplicate employeeId detected (attempt ${retries}/${maxRetries}), retrying...`);
+              if (retries >= maxRetries) {
+                throw new Error(`Failed to create customer after ${maxRetries} attempts due to duplicate employeeId. Please try again.`);
+              }
+              // Wait a bit before retrying
+              await new Promise(resolve => setTimeout(resolve, 100 * retries));
+            } else {
+              // Other errors, throw immediately
+              throw createError;
+            }
+          }
+        }
       }
 
       // Map uploaded docs
@@ -163,40 +190,67 @@ router.post(
         : [];
 
       // Create Application
-      const app = await Application.create({
-        appNo: await generateEmployeeId("APPLICATION"),
-        partnerId: req.user.role === ROLES.PARTNER ? userId : null,
-        rmId: req.user.role === ROLES.PARTNER ? partner.rmId : null,
-        customerId: customerUser._id,
-        loanType,
-        customer: {
-          firstName: customer.firstName,
-          middleName: customer.middleName || "",
-          lastName: customer.lastName || "",
-          email: customer.email,
-          phone: customer.phone,
-          mothersName: customer.mothersName || "",
-          panNumber: customer.panNumber || "",
-          dateOfBirth: customer.dateOfBirth,
-          gender: customer.gender,
-          maritalStatus: customer.maritalStatus,
-          currentAddress: product.currentAddress,
-          permanentAddress: product.permanentAddress || product.currentAddress,
-          loanAmount: customer.loanAmount
-            ? Number(customer.loanAmount)
-            : undefined,
-          partnerId: req.user.role === ROLES.PARTNER ? userId : null, // ✅ assign partnerId here
-          rmId: req.user.role === ROLES.PARTNER ? partner.rmId : null, // ✅ assign RM
-          asmId: req.user.role === ROLES.PARTNER ? partner.asmId : null, // ✅ assign ASM
-        },
-        docs,
-        references: refs,
-        employmentInfo,
-        businessInfo,
-        propertyInfo,
-        status: "DRAFT",
-        stageHistory: [],
-      });
+      // ✅ CRITICAL: Retry logic to handle duplicate appNo race conditions
+      let app = null;
+      let appRetries = 0;
+      const maxAppRetries = 5;
+      let appCreated = false;
+      
+      while (!appCreated && appRetries < maxAppRetries) {
+        try {
+          const appNo = await generateEmployeeId("APPLICATION");
+          app = await Application.create({
+            appNo,
+            partnerId: req.user.role === ROLES.PARTNER ? userId : null,
+            rmId: req.user.role === ROLES.PARTNER ? partner.rmId : null,
+            customerId: customerUser._id,
+            loanType,
+            customer: {
+              firstName: customer.firstName,
+              middleName: customer.middleName || "",
+              lastName: customer.lastName || "",
+              email: customer.email,
+              phone: customer.phone,
+              mothersName: customer.mothersName || "",
+              panNumber: customer.panNumber || "",
+              dateOfBirth: customer.dateOfBirth,
+              gender: customer.gender,
+              maritalStatus: customer.maritalStatus,
+              currentAddress: product.currentAddress,
+              permanentAddress: product.permanentAddress || product.currentAddress,
+              loanAmount: customer.loanAmount
+                ? Number(customer.loanAmount)
+                : undefined,
+              partnerId: req.user.role === ROLES.PARTNER ? userId : null, // ✅ assign partnerId here
+              rmId: req.user.role === ROLES.PARTNER ? partner.rmId : null, // ✅ assign RM
+              asmId: req.user.role === ROLES.PARTNER ? partner.asmId : null, // ✅ assign ASM
+            },
+            docs,
+            references: refs,
+            employmentInfo,
+            businessInfo,
+            propertyInfo,
+            status: "DRAFT",
+            stageHistory: [],
+          });
+          appCreated = true;
+          console.log(`✅ Application created with unique appNo: ${appNo}`);
+        } catch (createError) {
+          // Handle duplicate key error (E11000)
+          if (createError.code === 11000 && createError.keyPattern?.appNo) {
+            appRetries++;
+            console.warn(`⚠️ Duplicate appNo detected (attempt ${appRetries}/${maxAppRetries}), retrying...`);
+            if (appRetries >= maxAppRetries) {
+              throw new Error(`Failed to create application after ${maxAppRetries} attempts due to duplicate appNo. Please try again.`);
+            }
+            // Wait a bit before retrying
+            await new Promise(resolve => setTimeout(resolve, 100 * appRetries));
+          } else {
+            // Other errors, throw immediately
+            throw createError;
+          }
+        }
+      }
 
       res.status(201).json({
         message: "Application + Customer created",
