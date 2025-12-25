@@ -13,6 +13,7 @@ import { bannerUpload } from "../middleware/bannerUpload.js";
 import { Banner } from "../models/Banner.js";
 import mongoose from "mongoose";
 import fs from "fs";
+import path from "path";
 import { sendMail } from "../utils/sendMail.js";
 
 const router = Router();
@@ -865,6 +866,79 @@ router.get(
       console.error("Error fetching customers under partner:", err);
 
       res.status(500).json({ message: "Error fetching customers" });
+    }
+  }
+);
+
+// ✅ DELETE /admin/customer/:customerId - Delete customer and all their loan applications (Admin only)
+router.delete(
+  "/customer/:customerId",
+  auth,
+  requireRole(ROLES.SUPER_ADMIN),
+  async (req, res) => {
+    try {
+      const { customerId } = req.params;
+
+      if (!mongoose.Types.ObjectId.isValid(customerId)) {
+        return res.status(400).json({ message: "Invalid customer ID" });
+      }
+
+      // Find the customer
+      const customer = await User.findOne({ 
+        _id: customerId, 
+        role: ROLES.CUSTOMER 
+      });
+
+      if (!customer) {
+        return res.status(404).json({ message: "Customer not found" });
+      }
+
+      // Find all applications for this customer
+      const applications = await Application.find({ 
+        customerId: customerId 
+      });
+
+      // Delete all documents/files associated with applications
+      for (const app of applications) {
+        if (app.docs && Array.isArray(app.docs)) {
+          for (const doc of app.docs) {
+            if (doc.url) {
+              try {
+                const filePath = doc.url.startsWith('/') 
+                  ? path.join(process.cwd(), doc.url)
+                  : doc.url;
+                if (fs.existsSync(filePath)) {
+                  fs.unlinkSync(filePath);
+                }
+              } catch (fileErr) {
+                console.error(`Error deleting file ${doc.url}:`, fileErr.message);
+                // Continue even if file deletion fails
+              }
+            }
+          }
+        }
+      }
+
+      // Delete all applications for this customer
+      const deletedAppsCount = await Application.deleteMany({ 
+        customerId: customerId 
+      });
+
+      // Delete the customer user
+      await User.deleteOne({ _id: customerId });
+
+      res.json({
+        message: "Customer and all associated loan applications deleted successfully",
+        customerId: customerId,
+        customerName: `${customer.firstName} ${customer.lastName}`,
+        deletedApplications: deletedAppsCount.deletedCount,
+      });
+    } catch (error) {
+      console.error("Error deleting customer:", error);
+      res.status(500).json({ 
+        message: "Failed to delete customer", 
+        error: error.message 
+      });
     }
   }
 );
