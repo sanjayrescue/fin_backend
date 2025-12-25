@@ -13,7 +13,9 @@ import { partnerUpload } from "../middleware/profileUpload.js";
 import mongoose from "mongoose";
 import { makePartnerCode } from "../utils/codes.js";
 import { sendMail } from "../utils/sendMail.js";
+import { sendPartnerRegistrationEmail } from "../utils/emailService.js";
 import { Target } from "../models/Target.js";
+import { createNotification, createNotificationsForUsers } from "../utils/notificationService.js";
 
 const validateApplicationPayload = ({
   customer = {},
@@ -203,28 +205,136 @@ router.post(
         docs,
       });
 
-      // Send mail
+      // 📧 Send activation email to partner using email service
+      await sendPartnerRegistrationEmail(partner, password ? null : rawPassword);
+
+      // 🔔 Create notification for Admin about new partner registration
       try {
-        await sendMail({
-          to: partner.email,
-          subject: "Thanks for joining us",
-          html: `
-            <h2>Dear ${partner.firstName} ${partner.lastName},</h2>
-            <p>Your partner account is created successfully.</p>
-            <p><b>Employee ID:</b> ${partner.employeeId}</p>
-            <p><b>PartnerCode:</b> ${partner.partnerCode}</p>
-            <p><b>Account Status:</b> ${partner.status}</p>
-            <hr/>
-            <p>Login URL: https://trustlinefintech.com/login</p>
-            <p><b>Email:</b> ${partner.email}</p>
-            <p><b>Password:</b> ${password ? "Set by you" : rawPassword}</p>
-            <br/>
-            <p>Thank you,<br/>Trustline Fintech Team</p>
-          `,
+        const adminUsers = await User.find({ 
+          role: { $in: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
+          status: "ACTIVE"
+        }).select("_id").lean();
+        
+        if (adminUsers.length > 0) {
+          const adminUserIds = adminUsers.map(u => u._id.toString());
+          
+          await createNotificationsForUsers(adminUserIds, {
+            type: "registration",
+            title: "New Partner Registration",
+            message: `${partner.firstName} ${partner.lastName} (${partner.email}) has registered as a Partner. Status: ${partner.status}`,
+            category: "partner",
+            priority: partner.status === "PENDING" ? "high" : "normal",
+            data: {
+              partnerId: partner._id.toString(),
+              partnerCode: partner.partnerCode,
+              employeeId: partner.employeeId,
+              status: partner.status,
+              registrationDate: new Date(),
+            },
+            actionBy: {
+              _id: partner._id,
+              name: `${partner.firstName} ${partner.lastName}`,
+              role: ROLES.PARTNER,
+              email: partner.email,
+              employeeId: partner.employeeId,
+            },
+          });
+
+          // Emit socket event to admin users
+          if (global.io) {
+            global.io.to("admin").emit("newPartnerRegistered", {
+              partner: {
+                _id: partner._id,
+                firstName: partner.firstName,
+                lastName: partner.lastName,
+                email: partner.email,
+                status: partner.status,
+                partnerCode: partner.partnerCode,
+                employeeId: partner.employeeId,
+              },
+              timestamp: new Date(),
+            });
+            console.log("✅ Socket event emitted to admin users for new partner registration");
+          }
+        }
+      } catch (notifErr) {
+        console.error("❌ Error creating admin notification:", notifErr);
+      }
+
+      // 🔔 Create notification for assigned RM (if exists)
+      if (assignedRmId) {
+        try {
+          await createNotification(assignedRmId.toString(), {
+            type: "registration",
+            title: "New Partner Assigned",
+            message: `${partner.firstName} ${partner.lastName} (${partner.partnerCode}) has been assigned to you. Status: ${partner.status}`,
+            category: "partner",
+            priority: "normal",
+            data: {
+              partnerId: partner._id.toString(),
+              partnerCode: partner.partnerCode,
+              employeeId: partner.employeeId,
+              status: partner.status,
+            },
+            actionBy: {
+              _id: partner._id,
+              name: `${partner.firstName} ${partner.lastName}`,
+              role: ROLES.PARTNER,
+              email: partner.email,
+            },
+          });
+
+          // Emit socket event to RM
+          if (global.io) {
+            global.io.to(`rm_${assignedRmId.toString()}`).emit("newPartnerRegistered", {
+              partner: {
+                _id: partner._id,
+                firstName: partner.firstName,
+                lastName: partner.lastName,
+                email: partner.email,
+                status: partner.status,
+                partnerCode: partner.partnerCode,
+              },
+              timestamp: new Date(),
+            });
+            console.log("✅ Socket event emitted to RM for new partner registration");
+          }
+        } catch (rmNotifErr) {
+          console.error("❌ Error creating RM notification:", rmNotifErr);
+        }
+      }
+
+      // 🔔 Create notification for the partner about their registration
+      try {
+        await createNotification(partner._id.toString(), {
+          type: "registration",
+          title: "Registration Successful",
+          message: `Your partner account has been created successfully. Your account status is: ${partner.status}. ${partner.status === "PENDING" ? "You will be notified once your account is activated." : "You can now start using the platform."}`,
+          category: "partner",
+          priority: "normal",
+          data: {
+            partnerCode: partner.partnerCode,
+            employeeId: partner.employeeId,
+            status: partner.status,
+          },
         });
-        console.log("Email sent successfully to partner:", partner.email);
-      } catch (mailErr) {
-        console.error("Email send failed:", mailErr);
+
+        // Emit socket event to partner
+        if (global.io) {
+          global.io.to(`partner_${partner._id.toString()}`).emit("registrationSuccessful", {
+            partner: {
+              _id: partner._id,
+              firstName: partner.firstName,
+              lastName: partner.lastName,
+              status: partner.status,
+              partnerCode: partner.partnerCode,
+            },
+            timestamp: new Date(),
+          });
+          console.log("✅ Socket event emitted to partner for registration success");
+        }
+      } catch (partnerNotifErr) {
+        console.error("❌ Error creating partner notification:", partnerNotifErr);
       }
 
       // 🔹 STEP 2: Redistribute RM target among all Partners
